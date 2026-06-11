@@ -1,14 +1,27 @@
-; Godot 4 project — ride-sim-world DEM terrain prototype.
-; Engine version: Godot 4.2+ recommended.
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
 
 config_version=5
+
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
 config/name="ride-sim-world"
 config/description="Offline DEM-terrain on-rails cycling world, driven by ride_sim distance."
 run/main_scene="res://Main.tscn"
-config/features=PackedStringArray("4.2", "Forward Plus")
+config/features=PackedStringArray("4.6", "Forward Plus")
+
+[debug]
+
+gdscript/warnings/enable=false
 
 [rendering]
 

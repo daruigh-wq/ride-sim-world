@@ -15,9 +15,12 @@ extends Node3D
 
 @export var udp_port: int = 5005
 @export var demo_speed: float = 6.7      # m/s (~15 mph) when no telemetry
-@export var eye_height: float = 1.6      # camera height above road, metres
-@export var look_ahead_m: float = 25.0   # camera aims this far down-route
-@export var road_width: float = 6.0
+@export var eye_height: float = 1.8      # camera height above road, metres
+@export var look_ahead_m: float = 16.0   # camera aims this far down-route
+@export var aim_height: float = 0.4      # look-target height -> downward tilt
+@export var road_width: float = 8.0
+@export var road_lift: float = 5.0       # raise road (and camera) above terrain
+										 # to clear coarse-terrain occlusion
 
 var world: Dictionary
 var heights: PackedFloat32Array
@@ -81,7 +84,7 @@ func _terrain_y(x: float, z: float) -> float:
 	var h10 := heights[ri * gw + ci + 1]
 	var h01 := heights[(ri + 1) * gw + ci]
 	var h11 := heights[(ri + 1) * gw + ci + 1]
-	return lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fz)
+	return lerpf(lerpf(h00, h10, fx), lerpf(h01, h11, fx), fz)
 
 
 func _elev_color(y: float) -> Color:
@@ -144,12 +147,19 @@ func _build_terrain() -> void:
 
 
 func _build_road() -> void:
+	# Lifted well clear of the coarse (~22 m) terrain triangulation so it isn't
+	# swallowed on slopes. Asphalt, plus a bright center line that streams past
+	# as a motion cue.
+	_ribbon(road_width * 0.5, Color(0.30, 0.30, 0.33), road_lift, 0.9)
+	_ribbon(0.30, Color(0.95, 0.82, 0.15), road_lift + 0.1, 0.6)
+
+
+func _ribbon(hw: float, col: Color, lift: float, rough: float) -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var hw := road_width * 0.5
 	for i in range(pts.size() - 1):
-		var p0 := Vector3(pts[i].x, 0, pts[i].z)
-		var p1 := Vector3(pts[i + 1].x, 0, pts[i + 1].z)
+		var p0 := Vector3(float(pts[i].x), 0, float(pts[i].z))
+		var p1 := Vector3(float(pts[i + 1].x), 0, float(pts[i + 1].z))
 		var dir := (p1 - p0)
 		if dir.length() < 0.01:
 			continue
@@ -159,17 +169,17 @@ func _build_road() -> void:
 		var b := p0 + perp * hw
 		var c := p1 - perp * hw
 		var d := p1 + perp * hw
-		a.y = _terrain_y(a.x, a.z) + 0.25
-		b.y = _terrain_y(b.x, b.z) + 0.25
-		c.y = _terrain_y(c.x, c.z) + 0.25
-		d.y = _terrain_y(d.x, d.z) + 0.25
+		a.y = _terrain_y(a.x, a.z) + lift
+		b.y = _terrain_y(b.x, b.z) + lift
+		c.y = _terrain_y(c.x, c.z) + lift
+		d.y = _terrain_y(d.x, d.z) + lift
 		for v in [a, c, b, b, c, d]:
 			st.add_vertex(v)
 	st.generate_normals()
 	var mesh := st.commit()
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.17, 0.17, 0.19)
-	mat.roughness = 0.95
+	mat.albedo_color = col
+	mat.roughness = rough
 	mesh.surface_set_material(0, mat)
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
@@ -198,6 +208,7 @@ func _build_camera_and_sky() -> void:
 	cam.fov = 70.0
 	cam.far = 12000.0
 	add_child(cam)
+	cam.make_current()
 	_update_camera(0.0)
 
 
@@ -210,19 +221,24 @@ func _pos_xz_at(d: float) -> Vector3:
 		seg_i += 1
 	while seg_i > 0 and float(pts[seg_i].d) > d:
 		seg_i -= 1
-	var p0 = pts[seg_i]; var p1 = pts[seg_i + 1]
+	var p0 = pts[seg_i]
+	var p1 = pts[seg_i + 1]
 	var span := float(p1.d) - float(p0.d)
-	var t := 0.0 if span < 0.001 else (d - float(p0.d)) / span
-	var x := lerp(float(p0.x), float(p1.x), t)
-	var z := lerp(float(p0.z), float(p1.z), t)
+	var t := 0.0
+	if span >= 0.001:
+		t = (d - float(p0.d)) / span
+	var x := lerpf(float(p0.x), float(p1.x), t)
+	var z := lerpf(float(p0.z), float(p1.z), t)
 	return Vector3(x, 0, z)
 
 
 func _update_camera(d: float) -> void:
 	var here := _pos_xz_at(d)
 	var ahead := _pos_xz_at(d + look_ahead_m)
-	here.y = _terrain_y(here.x, here.z) + eye_height
-	ahead.y = _terrain_y(ahead.x, ahead.z) + eye_height
+	here.y = _terrain_y(here.x, here.z) + road_lift + eye_height
+	# aim at road level ahead (not eye level) so the camera tilts down and the
+	# road surface streams into view instead of grazing the horizon
+	ahead.y = _terrain_y(ahead.x, ahead.z) + road_lift + aim_height
 	cam.global_position = here
 	if here.distance_to(ahead) > 0.1:
 		cam.look_at(ahead, Vector3.UP)
@@ -251,13 +267,15 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(e: InputEvent) -> void:
-	if e is InputEventKey and e.pressed and not e.echo:
-		match e.keycode:
-			KEY_ESCAPE:
-				get_tree().quit()
-			KEY_SPACE:
-				paused = not paused
-			KEY_EQUAL, KEY_KP_ADD:
-				demo_speed = minf(demo_speed + 1.0, 30.0)
-			KEY_MINUS, KEY_KP_SUBTRACT:
-				demo_speed = maxf(demo_speed - 1.0, 1.0)
+	var k := e as InputEventKey
+	if k == null or not k.pressed or k.echo:
+		return
+	match k.keycode:
+		KEY_ESCAPE:
+			get_tree().quit()
+		KEY_SPACE:
+			paused = not paused
+		KEY_EQUAL, KEY_KP_ADD:
+			demo_speed = minf(demo_speed + 1.0, 30.0)
+		KEY_MINUS, KEY_KP_SUBTRACT:
+			demo_speed = maxf(demo_speed - 1.0, 1.0)
