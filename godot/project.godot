@@ -1,0 +1,15 @@
+; Godot 4 project — ride-sim-world DEM terrain prototype.
+; Engine version: Godot 4.2+ recommended.
+
+config_version=5
+
+[application]
+
+config/name="ride-sim-world"
+config/description="Offline DEM-terrain on-rails cycling world, driven by ride_sim distance."
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.2", "Forward Plus")
+
+[rendering]
+
+environment/defaults/default_clear_color=Color(0.5, 0.65, 0.8, 1)

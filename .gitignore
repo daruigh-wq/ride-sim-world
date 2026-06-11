@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Generated / fetched data — regenerable from your own rides, can be large
+data/tiles/
+godot/data/tiles/
+*.bin
+route.json
+world.json
+heights.bin
+
+# Godot
+godot/.godot/
+godot/.import/
+export_presets.cfg
+*.translation
