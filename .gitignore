@@ -14,6 +14,9 @@ godot/data/tiles/
 route.json
 world.json
 heights.bin
+features.json
+osm_cache.json
+osm_buildings_cache.json
 
 # Godot
 godot/.godot/
