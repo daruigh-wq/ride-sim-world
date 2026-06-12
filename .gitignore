@@ -8,15 +8,20 @@ venv/
 .DS_Store
 
 # Generated / fetched data — regenerable from your own rides, can be large
+tiles/
 data/tiles/
 godot/data/tiles/
 *.bin
+*.gpx
 route.json
 world.json
 heights.bin
 features.json
 osm_cache.json
 osm_buildings_cache.json
+osm_graph_cache.json
+# per-route working/backup data dirs
+godot/data_*/
 
 # Godot
 godot/.godot/

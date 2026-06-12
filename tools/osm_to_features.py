@@ -96,6 +96,51 @@ out body qt;
 """
 
 
+def densify(points, step=3.0):
+    """Sample a route polyline (list of {x,z}) to ~uniform `step` m points."""
+    out = []
+    for i in range(len(points) - 1):
+        ax, az = points[i]["x"], points[i]["z"]
+        bx, bz = points[i + 1]["x"], points[i + 1]["z"]
+        seg = math.hypot(bx - ax, bz - az)
+        if seg < 1e-6:
+            continue
+        k = max(1, int(seg // step))
+        for j in range(k):
+            f = j / k
+            out.append((ax + (bx - ax) * f, az + (bz - az) * f))
+    out.append((points[-1]["x"], points[-1]["z"]))
+    return out
+
+
+def point_in_poly(x, z, poly):
+    """Ray-cast point-in-polygon. poly is a list of [x, z] (closed or open)."""
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, zi = poly[i][0], poly[i][1]
+        xj, zj = poly[j][0], poly[j][1]
+        if (zi > z) != (zj > z) and x < (xj - xi) * (z - zi) / (zj - zi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _seg_dist(px, pz, ax, az, bx, bz):
+    dx, dz = bx - ax, bz - az
+    l2 = dx * dx + dz * dz
+    if l2 < 1e-9:
+        return math.hypot(px - ax, pz - az)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (pz - az) * dz) / l2))
+    return math.hypot(px - (ax + t * dx), pz - (az + t * dz))
+
+
+def dist_to_poly(px, pz, poly):
+    return min(_seg_dist(px, pz, poly[i][0], poly[i][1], poly[i + 1][0], poly[i + 1][1])
+               for i in range(len(poly) - 1))
+
+
 def parse_height(tags):
     """Best-effort building height in metres from OSM tags."""
     h = tags.get("height")
@@ -139,6 +184,8 @@ def main():
                     help="extend query past route bbox (scenery headroom)")
     ap.add_argument("--building-margin", type=float, default=200.0,
                     help="keep only buildings within ~this distance of the route")
+    ap.add_argument("--road-clearance", type=float, default=6.0,
+                    help="cull buildings the route enters or passes within this of (0=off)")
     ap.add_argument("--no-buildings", action="store_true",
                     help="skip the (large) building footprint query")
     ap.add_argument("--refetch", action="store_true",
@@ -221,7 +268,16 @@ def main():
             elif el["type"] == "way" and "building" in el.get("tags", {}):
                 bways.append(el)
 
-        kept = dropped = 0
+        # densified route + fine grid for the in-the-road clearance test (route.json
+        # is coarse, so test against a 3 m-sampled line, not its raw vertices).
+        clear = args.road_clearance
+        ccell = max(15.0, clear * 3.0)
+        dense = densify(route["points"], 3.0)
+        rgrid = {}
+        for rx, rz in dense:
+            rgrid.setdefault((int(rx // ccell), int(rz // ccell)), []).append((rx, rz))
+
+        kept = dropped = in_road = 0
         for way in bways:
             pts = [proj(*bnodes[r]) for r in way.get("nodes", []) if r in bnodes]
             if len(pts) < 4:
@@ -236,9 +292,21 @@ def main():
                 continue
             if pts[0] != pts[-1]:
                 pts.append(pts[0])
+            if clear > 0:
+                xs = [p[0] for p in pts]
+                zs = [p[1] for p in pts]
+                cand = []
+                for gx2 in range(int((min(xs) - clear) // ccell), int((max(xs) + clear) // ccell) + 1):
+                    for gz2 in range(int((min(zs) - clear) // ccell), int((max(zs) + clear) // ccell) + 1):
+                        cand.extend(rgrid.get((gx2, gz2), []))
+                if any(point_in_poly(rx, rz, pts) or dist_to_poly(rx, rz, pts) < clear
+                       for rx, rz in cand):
+                    in_road += 1
+                    continue
             out["buildings"].append({"pts": pts, "h": parse_height(way.get("tags", {}))})
             kept += 1
-        print(f"buildings {kept} kept, {dropped} dropped (>~{cell:.0f} m from route)")
+        print(f"buildings {kept} kept, {dropped} far, {in_road} culled in-road "
+              f"(<{clear:.0f} m / inside footprint)")
 
     os.makedirs(args.out_dir, exist_ok=True)
     path = os.path.join(args.out_dir, "features.json")

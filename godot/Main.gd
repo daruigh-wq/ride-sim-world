@@ -32,6 +32,8 @@ extends Node3D
 @export var show_buildings: bool = true  # extruded OSM footprints near the route
 @export var building_height_scale: float = 1.0
 @export var feature_lift: float = 0.3    # cross-streets sit just below the ridden road
+@export var resample_m: float = 4.5      # resample route to uniform spacing (m) at
+										 # load; densifies coarse OSM-routed paths. 0 = off
 @export var route_smooth: int = 3        # centerline moving-average radius (pts);
 										 # smooths GPS jitter / stop-light loops. 0 = off
 @export var show_minimap: bool = true    # north-up route map overlay (toggle: M)
@@ -100,8 +102,46 @@ func _load_data() -> void:
 	# world shares one corrected frame. pts is the single source for road+cam+map.
 	for i in range(pts.size()):
 		pts[i]["x"] = -float(pts[i].x)
+	_resample_route(resample_m)
 	_smooth_route(route_smooth)
-	print("route %.2f km, terrain %d x %d cells" % [route_len / 1000.0, gw, gh])
+	print("route %.2f km, terrain %d x %d cells, %d pts" % [route_len / 1000.0, gw, gh, pts.size()])
+
+
+# Resample the centerline to ~uniform `spacing` m (arc-length walk + linear interp).
+# Densifies coarse OSM-routed paths so the rider, camera, and road ribbon stop
+# showing angular kinks at sparse nodes, and makes the moving-average smoothing
+# uniform. Rebuilds cumulative d.
+func _resample_route(spacing: float) -> void:
+	var n := pts.size()
+	if spacing <= 0.0 or n < 2:
+		return
+	var out := []
+	out.append({"x": float(pts[0].x), "y": float(pts[0].y), "z": float(pts[0].z), "d": 0.0})
+	var total := 0.0
+	var carry := 0.0
+	for i in range(1, n):
+		var ax := float(pts[i - 1].x); var ay := float(pts[i - 1].y); var az := float(pts[i - 1].z)
+		var bx := float(pts[i].x); var by := float(pts[i].y); var bz := float(pts[i].z)
+		var dx := bx - ax; var dy := by - ay; var dz := bz - az
+		var seg := sqrt(dx * dx + dz * dz)
+		if seg < 0.0001:
+			continue
+		var t := spacing - carry
+		while t <= seg:
+			var f := t / seg
+			total += spacing
+			out.append({"x": ax + dx * f, "y": ay + dy * f, "z": az + dz * f, "d": total})
+			t += spacing
+		carry = seg - (t - spacing)
+	var last_p = pts[n - 1]
+	var prev_p = out[out.size() - 1]
+	var ex := float(last_p.x) - float(prev_p.x); var ez := float(last_p.z) - float(prev_p.z)
+	var tail := sqrt(ex * ex + ez * ez)
+	if tail > 0.1:
+		out.append({"x": float(last_p.x), "y": float(last_p.y), "z": float(last_p.z),
+				"d": float(prev_p.d) + tail})
+	pts = out
+	route_len = float(out[out.size() - 1].d)
 
 
 # Moving-average the centerline x/z in place (keeps each point's distance d and
@@ -122,6 +162,17 @@ func _smooth_route(radius: int) -> void:
 	for i in range(n):
 		pts[i]["x"] = sx[i]
 		pts[i]["z"] = sz[i]
+	# Smoothing moved the points but stored d are the ORIGINAL arc-lengths; left
+	# as-is, position(d) advances at a varying euclidean speed (the demo pulses,
+	# obvious in a close/low chase). Recompute cumulative distance to match.
+	var total := 0.0
+	pts[0]["d"] = 0.0
+	for i in range(1, n):
+		var dx := sx[i] - sx[i - 1]
+		var dz := sz[i] - sz[i - 1]
+		total += sqrt(dx * dx + dz * dz)
+		pts[i]["d"] = total
+	route_len = total
 
 
 # --- terrain sampling -------------------------------------------------------
@@ -623,17 +674,32 @@ func _pos_xz_at(d: float) -> Vector3:
 	return Vector3(x, 0, z)
 
 
+# Smoothed ground height over the camera->target span: averaging terrain across
+# the view distance low-passes bumps so the camera doesn't bob, while still
+# following real hills. Includes road_lift.
+func _smooth_ground(d: float) -> float:
+	var d0 := d - cam_back_m
+	var d1 := d + look_ahead_m
+	var steps := 6
+	var acc := 0.0
+	for i in range(steps + 1):
+		var p := _pos_xz_at(lerpf(d0, d1, float(i) / steps))
+		acc += _terrain_y(p.x, p.z)
+	return acc / float(steps + 1) + road_lift
+
+
 func _update_camera(d: float) -> void:
-	# Chase view: sit behind and above the rider, look down-route at road level.
-	# Elevation + downward tilt give the ribbon real screen area instead of the
-	# edge-on sliver you get from an on-road eye-height camera.
+	# Horizon-locked chase view: position plumb-locked to the (smoothed) track,
+	# steered by yaw. Camera height AND aim height share one smoothed ground value,
+	# so the pitch is constant — no terrain-induced bobbing — while the camera
+	# still rises and falls over real hills.
 	var behind := _pos_xz_at(d - cam_back_m)
 	var ahead := _pos_xz_at(d + look_ahead_m)
-	behind.y = _terrain_y(behind.x, behind.z) + road_lift + cam_height
-	ahead.y = _terrain_y(ahead.x, ahead.z) + road_lift + aim_height
-	cam.global_position = behind
-	if behind.distance_to(ahead) > 0.1:
-		cam.look_at(ahead, Vector3.UP)
+	var ground := _smooth_ground(d)
+	cam.global_position = Vector3(behind.x, ground + cam_height, behind.z)
+	var target := Vector3(ahead.x, ground + aim_height, ahead.z)
+	if absf(behind.x - ahead.x) + absf(behind.z - ahead.z) > 0.1:
+		cam.look_at(target, Vector3.UP)
 
 
 # --- main loop --------------------------------------------------------------
