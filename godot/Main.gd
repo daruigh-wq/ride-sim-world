@@ -14,11 +14,17 @@ extends Node3D
 # Keys: SPACE pause/resume demo, +/- demo speed, ESC quit.
 
 @export var udp_port: int = 5005
+@export var wait_for_telemetry: bool = true  # hold at the start line until ride_sim's
+										 # first packet (no phantom demo advance / snap-
+										 # back). Untick for standalone route preview.
 @export var demo_speed: float = 6.7      # m/s (~15 mph) when no telemetry
 @export var look_ahead_m: float = 25.0   # camera aims this far down-route
 @export var aim_height: float = 0.5      # look-target height above road
 @export var cam_back_m: float = 8.0      # camera trails this far behind the rider
 @export var cam_height: float = 5.0      # camera height above road (chase view)
+@export var cam_yaw_rate_deg: float = 120.0  # max camera turn rate (deg/s); damps the
+										 # heading so sharp route reversals (dead-end
+										 # out-and-backs) pan smoothly instead of flipping
 @export var road_width: float = 8.0
 @export var road_lift: float = 0.5       # sit road just above terrain; finer
 										 # (~11 m) bake means no 5 m floating hack
@@ -37,7 +43,7 @@ extends Node3D
 @export var route_smooth: int = 3        # centerline moving-average radius (pts);
 										 # smooths GPS jitter / stop-light loops. 0 = off
 @export var show_minimap: bool = true    # north-up route map overlay (toggle: M)
-@export var minimap_size: int = 300      # minimap square size in px
+@export var minimap_size: int = 480      # minimap square size in px
 @export var show_avatar: bool = true     # rider marker following the path
 @export var avatar_scale: float = 1.0    # scale the rider (bump up for the drone view)
 @export var show_ghost: bool = true      # ghost rider (different glow color)
@@ -60,6 +66,7 @@ var live := false
 var cur_speed: float = 0.0
 var paused := false
 var seg_i := 0             # cached segment index for distance lookup
+var cam_fwd := Vector2.ZERO   # damped camera heading (world x,z); 0 until first frame
 
 var udp := PacketPeerUDP.new()
 var cam: Camera3D
@@ -78,7 +85,10 @@ func _ready() -> void:
 	_build_minimap()
 	_build_avatar()
 	if udp.bind(udp_port) == OK:
-		print("listening for ride_sim telemetry on udp:%d" % udp_port)
+		if wait_for_telemetry:
+			print("listening on udp:%d — holding at start until ride_sim connects (untick wait_for_telemetry for standalone demo)" % udp_port)
+		else:
+			print("listening for ride_sim telemetry on udp:%d (standalone demo running)" % udp_port)
 	else:
 		push_warning("could not bind udp:%d — demo mode only" % udp_port)
 
@@ -96,6 +106,7 @@ func _load_data() -> void:
 	var route: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://data/route.json"))
 	pts = route.points
 	route_len = float(route.length_m)
+	var src_len := route_len   # ride_sim drives an ABSOLUTE distance_m on THIS length
 	# Un-mirror: mapping ENU East->+X / North->+Z into Godot's axes is a reflection
 	# (flips chirality, so right turns render as left bends). Negate East here, and
 	# matching negations in _build_terrain/_terrain_y/_build_features, so the whole
@@ -104,7 +115,24 @@ func _load_data() -> void:
 		pts[i]["x"] = -float(pts[i].x)
 	_resample_route(resample_m)
 	_smooth_route(route_smooth)
+	_rescale_distance(src_len)
 	print("route %.2f km, terrain %d x %d cells, %d pts" % [route_len / 1000.0, gw, gh, pts.size()])
+
+
+# Resample + smooth can corner-cut and shorten the path (smoothing the SF route
+# loses ~165 m at the crooked block). ride_sim drives an absolute distance_m
+# defined on the ORIGINAL route length, so on the shortened route the map marker
+# and the world position diverge — worst exactly at the curves the smoothing cut.
+# Rescale cumulative d back to the source length. Linear scale → demo speed stays
+# uniform; position(distance_m) now tracks ride_sim's GPS map.
+func _rescale_distance(target_len: float) -> void:
+	var n := pts.size()
+	if n < 2 or route_len <= 0.0 or target_len <= 0.0:
+		return
+	var k := target_len / route_len
+	for i in range(n):
+		pts[i]["d"] = float(pts[i].d) * k
+	route_len = target_len
 
 
 # Resample the centerline to ~uniform `spacing` m (arc-length walk + linear interp).
@@ -556,7 +584,7 @@ func _build_camera_and_sky() -> void:
 	cam.far = 12000.0
 	add_child(cam)
 	cam.make_current()
-	_update_camera(0.0)
+	_update_camera(0.0, 0.0)
 
 
 func _build_minimap() -> void:
@@ -688,7 +716,7 @@ func _smooth_ground(d: float) -> float:
 	return acc / float(steps + 1) + road_lift
 
 
-func _update_camera(d: float) -> void:
+func _update_camera(d: float, delta: float) -> void:
 	# Horizon-locked chase view: position plumb-locked to the (smoothed) track,
 	# steered by yaw. Camera height AND aim height share one smoothed ground value,
 	# so the pitch is constant — no terrain-induced bobbing — while the camera
@@ -697,8 +725,27 @@ func _update_camera(d: float) -> void:
 	var ahead := _pos_xz_at(d + look_ahead_m)
 	var ground := _smooth_ground(d)
 	cam.global_position = Vector3(behind.x, ground + cam_height, behind.z)
-	var target := Vector3(ahead.x, ground + aim_height, ahead.z)
-	if absf(behind.x - ahead.x) + absf(behind.z - ahead.z) > 0.1:
+
+	# Damped look heading: rate-limit how fast the aim direction turns. Aiming
+	# straight at a far look-ahead point makes the camera somersault where the
+	# route reverses (dead-end out-and-back): the target lands behind the camera
+	# and the aim vector swings through a degenerate pose. Slewing the heading at
+	# cam_yaw_rate_deg makes such reversals pan smoothly, and also removes the
+	# jaggy yaw on coarse polylines.
+	var des := Vector2(ahead.x - behind.x, ahead.z - behind.z)
+	if des.length() > 0.05:
+		des = des.normalized()
+		if cam_fwd == Vector2.ZERO:
+			cam_fwd = des
+		else:
+			var step := clampf(cam_fwd.angle_to(des),
+					-deg_to_rad(cam_yaw_rate_deg) * delta,
+					 deg_to_rad(cam_yaw_rate_deg) * delta)
+			cam_fwd = cam_fwd.rotated(step).normalized()
+	if cam_fwd != Vector2.ZERO:
+		var aim_dist := cam_back_m + look_ahead_m
+		var target := Vector3(behind.x + cam_fwd.x * aim_dist, ground + aim_height,
+							   behind.z + cam_fwd.y * aim_dist)
 		cam.look_at(target, Vector3.UP)
 
 
@@ -715,13 +762,15 @@ func _process(delta: float) -> void:
 
 	if live:
 		dist += cur_speed * delta          # dead-reckon between packets
-	elif not paused:
-		dist += demo_speed * delta
+	elif paused or wait_for_telemetry:
+		pass                                # hold at the start until ride_sim connects
+	else:
+		dist += demo_speed * delta         # standalone demo auto-advance
 
 	if dist >= route_len:
 		dist = 0.0                          # loop the demo
 		seg_i = 0
-	_update_camera(dist)
+	_update_camera(dist, delta)
 	_update_avatar(dist)
 
 	if minimap != null and minimap_layer.visible:
@@ -793,7 +842,7 @@ class Minimap extends Control:
 		var h := Vector2(hx, -hz)            # same vertical flip as _w2p
 		head_px = pos_px
 		if h.length() > 0.0001:
-			head_px = pos_px + h.normalized() * 12.0
+			head_px = pos_px + h.normalized() * maxf(12.0, msize.x / 22.0)
 		has_pos = true
 		if pos_px.distance_to(_last_px) > 1.5:
 			_last_px = pos_px
@@ -802,13 +851,15 @@ class Minimap extends Control:
 	func _draw() -> void:
 		draw_rect(Rect2(Vector2.ZERO, msize), Color(0.05, 0.05, 0.07, 0.55))
 		draw_rect(Rect2(Vector2.ZERO, msize), Color(1, 1, 1, 0.15), false, 1.0)
+		# scale line/marker weights with map size so a big minimap stays legible
+		var s := maxf(1.0, msize.x / 300.0)
 		if route_px.size() > 1:
-			draw_polyline(route_px, Color(0.95, 0.82, 0.15), 1.5)
-		draw_circle(start_px, 4.0, Color(0.2, 0.9, 0.2))
-		draw_circle(end_px, 3.5, Color(0.1, 0.1, 0.1))
+			draw_polyline(route_px, Color(0.95, 0.82, 0.15), 1.5 * s)
+		draw_circle(start_px, 4.0 * s, Color(0.2, 0.9, 0.2))
+		draw_circle(end_px, 3.5 * s, Color(0.1, 0.1, 0.1))
 		if has_pos:
 			if head_px != pos_px:
-				draw_line(pos_px, head_px, Color(1, 1, 1, 0.9), 2.0)
-			draw_circle(pos_px, 4.5, Color(0.95, 0.2, 0.2))
-		draw_string(ThemeDB.fallback_font, Vector2(msize.x * 0.5 - 4.0, 15.0), "N",
-				HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1, 0.7))
+				draw_line(pos_px, head_px, Color(1, 1, 1, 0.9), 2.0 * s)
+			draw_circle(pos_px, 4.5 * s, Color(0.95, 0.2, 0.2))
+		draw_string(ThemeDB.fallback_font, Vector2(msize.x * 0.5 - 4.0 * s, 15.0 * s), "N",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, int(12 * s), Color(1, 1, 1, 0.7))
