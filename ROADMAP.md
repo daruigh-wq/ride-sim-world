@@ -134,9 +134,19 @@ finish it. The clean internal seams mean unifying costs nothing architecturally.
 - **Offline gap:** the Leaflet map loads JS/CSS from unpkg CDN and tiles from carto
   — needs internet at ride time. Closing this (bundle Leaflet locally + offline
   tiles) is a P6/P7 task, separate from the world.
-- **Next: Godot export (step 2).** Blocked on a one-time **export-templates install**
-  (~1 GB, via the editor's Manage Export Templates) + a macOS `export_presets.cfg`.
-  Then ride_sim launches the exported binary instead of `/Applications/Godot.app`.
+- **Godot export ✅ (step 2, 2026-06-14):** export templates installed (4.6.3.stable);
+  `godot/export_presets.cfg` (macOS, universal, codesign off). Cleared blockers:
+  `import_etc2_astc=true` in project.godot (required for arm64); `include_filter=
+  "data/*"` (raw .json/.bin aren't "resources", so the default filter stripped them →
+  null-deref crash). arm64 needs an **ad-hoc signature** (`codesign --force --deep -s -`)
+  or it SIGKILLs/segfaults. Result: a standalone signed `RideSimWorld.app` that runs
+  without the editor and **binds UDP :5005** (verified).
+- **Step 2b — external data (new P6 sub-task):** the world hard-codes `res://data/`, so
+  the export embeds the world. The bundled-renderer model wants the binary
+  **data-agnostic**, loading from a path/user dir passed at launch (so one renderer
+  serves any baked route). Needed before ride_sim launches the bundled binary.
+- **Next: step 3** — ride_sim launches the exported binary instead of
+  `/Applications/Godot.app` (retires the "Godot app" picker).
 
 ## Resource usage
 

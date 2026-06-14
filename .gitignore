@@ -27,5 +27,7 @@ godot/data_*/
 # Godot
 godot/.godot/
 godot/.import/
-export_presets.cfg
 *.translation
+# exported binaries (regenerable; large)
+build/
+# export_presets.cfg IS tracked — the P6 macOS export config (no signing secrets)
