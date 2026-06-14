@@ -1,6 +1,6 @@
 # Ride Sim — Product Roadmap
 
-_Last updated: 2026-06-12_
+_Last updated: 2026-06-14_
 
 A planning document spanning the three repos. Living doc — edit freely.
 
@@ -66,11 +66,11 @@ Calendar assumes ~2 sessions/week, part-time.
 | # | Phase | Scope | Sessions |
 |---|-------|-------|----------|
 | P0 | **Foundation** ✅ | Pipeline + Godot terrain/road/on-rails camera; chase cam; finer bake | done |
-| P1 | **OSM feature layer** | `osm_to_features.py` (Overpass, route bbox, same ENU frame). Cross-streets/paths draped & classified (width/color). Water + landuse → terrain tint. | 2–3 |
-| P2 | **Buildings** | Extrude OSM `building=*` footprints; height from tag / `levels×3 m` / default. Low-poly town along the flats. | 2–3 |
+| P1 | **OSM feature layer** ✅ | `osm_to_features.py` (Overpass, route bbox, same ENU frame). Cross-streets/paths draped & classified (width/color). Water + landuse → terrain tint. | done |
+| P2 | **Buildings** ✅ | Extrude OSM `building=*` footprints; height from tag / `levels×3 m` / default; in-road cull. Low-poly town along the flats. | done |
 | P3 | **Visual polish** | Terrain textures/triplanar; vegetation billboards (`natural=tree`, forest polys); time-of-day sun via solar ephemeris (Shadowmap-style); fog/LOD/cull tuning. | 3–5 |
-| P4 | **Bake UX** | One entry point: GPX in → world dir out, with progress + caching + offline pre-fetch. Robust to missing tags / sparse coverage. | 2–3 |
-| P5 | **Unification** | ride_sim startup "which world?" picker; launch Godot for virtual rides; the few-line live UDP emitter (virtual_dist_m + speed_mps_smoothed already in SharedState). | 2–4 |
+| P4 | **Bake UX** ✅ | `bake_world.py`: one command, route (.gpx/.tcx/.fit) → world dir (route+DEM+OSM) **+ matching ride_sim TCX**; progress + per-world tile/OSM caching (offline re-runs). | done |
+| P5 | **Unification** | Live UDP emitter ✅ (ride_sim drives Godot, SIM+BLE). **Remaining:** ride_sim startup "which world?" picker + launch Godot for virtual rides. | 1–2 |
 | P6 | **Distribution** | Godot export templates; PyInstaller for ride_sim; bundle both; offline map tiles; first-run UX. | 3–5 |
 | P7 | **Video-path hardening** | macOS audio stutter (the hard one — possibly native AVFoundation backend); offline map; Gyroflow stabilization hook. | 3–6 |
 | P8 | **Splat path** _(stretch)_ | Photoreal backend on the same UDP socket. GPU-bound, separate repo. | TBD |
