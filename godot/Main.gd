@@ -83,15 +83,27 @@ var minimap_layer: CanvasLayer
 var avatar: Node3D
 var ghost: Node3D
 
+var data_dir := "res://data"   # where world.json/heights.bin/route.json/features.json
+							   # live; overridden by the RIDESIM_WORLD_DIR env var so one
+							   # exported binary can serve any baked route (P6).
+var loaded := false            # false if no world data was found (render nothing, no crash)
+
+
+# Resolve a data file against the active data dir (external dir or bundled res://data).
+func _dpath(name: String) -> String:
+	return data_dir + "/" + name
+
 
 func _ready() -> void:
 	_load_data()
-	_build_terrain()
-	_build_road()
-	_build_features()
+	if loaded:
+		_build_terrain()
+		_build_road()
+		_build_features()
 	_build_camera_and_sky()
-	_build_minimap()
-	_build_avatar()
+	if loaded:
+		_build_minimap()
+		_build_avatar()
 	back_udp.set_dest_address("127.0.0.1", back_port)
 	if udp.bind(udp_port) == OK:
 		if wait_for_telemetry:
@@ -103,16 +115,29 @@ func _ready() -> void:
 
 
 func _load_data() -> void:
-	world = JSON.parse_string(FileAccess.get_file_as_string("res://data/world.json"))
+	# Prefer an external baked-world dir (ride_sim sets RIDESIM_WORLD_DIR when it
+	# launches the bundled renderer); fall back to the bundled res://data.
+	var ext := OS.get_environment("RIDESIM_WORLD_DIR")
+	if ext != "" and DirAccess.dir_exists_absolute(ext):
+		data_dir = ext
+		print("world data dir: %s (external)" % ext)
+	else:
+		data_dir = "res://data"
+
+	var world_str := FileAccess.get_file_as_string(_dpath("world.json"))
+	if world_str == "":
+		push_error("no world data found at %s — rendering empty scene. Bake a route or set RIDESIM_WORLD_DIR." % data_dir)
+		return
+	world = JSON.parse_string(world_str)
 	gw = int(world.grid_w); gh = int(world.grid_h)
 	x0 = float(world.x0); z0 = float(world.z0)
 	mpp_x = float(world.mpp_x); mpp_z = float(world.mpp_z)
 
-	var f := FileAccess.open("res://data/heights.bin", FileAccess.READ)
+	var f := FileAccess.open(_dpath("heights.bin"), FileAccess.READ)
 	heights = f.get_buffer(f.get_length()).to_float32_array()
 	f.close()
 
-	var route: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://data/route.json"))
+	var route: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(_dpath("route.json")))
 	pts = route.points
 	route_len = float(route.length_m)
 	var src_len := route_len   # ride_sim drives an ABSOLUTE distance_m on THIS length
@@ -125,6 +150,7 @@ func _load_data() -> void:
 	_resample_route(resample_m)
 	_smooth_route(route_smooth)
 	_rescale_distance(src_len)
+	loaded = true
 	print("route %.2f km, terrain %d x %d cells, %d pts" % [route_len / 1000.0, gw, gh, pts.size()])
 
 
@@ -348,10 +374,10 @@ func _add_ribbon(st: SurfaceTool, line: PackedVector2Array, hw: float, lift: flo
 # --- OSM feature layers (roads, water, landuse) -----------------------------
 
 func _build_features() -> void:
-	if not FileAccess.file_exists("res://data/features.json"):
+	if not FileAccess.file_exists(_dpath("features.json")):
 		print("no features.json — skipping OSM layers (run tools/osm_to_features.py)")
 		return
-	var parsed = JSON.parse_string(FileAccess.get_file_as_string("res://data/features.json"))
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(_dpath("features.json")))
 	if typeof(parsed) != TYPE_DICTIONARY:
 		push_warning("features.json did not parse")
 		return

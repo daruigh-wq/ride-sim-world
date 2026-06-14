@@ -141,12 +141,15 @@ finish it. The clean internal seams mean unifying costs nothing architecturally.
   null-deref crash). arm64 needs an **ad-hoc signature** (`codesign --force --deep -s -`)
   or it SIGKILLs/segfaults. Result: a standalone signed `RideSimWorld.app` that runs
   without the editor and **binds UDP :5005** (verified).
-- **Step 2b — external data (new P6 sub-task):** the world hard-codes `res://data/`, so
-  the export embeds the world. The bundled-renderer model wants the binary
-  **data-agnostic**, loading from a path/user dir passed at launch (so one renderer
-  serves any baked route). Needed before ride_sim launches the bundled binary.
-- **Next: step 3** — ride_sim launches the exported binary instead of
-  `/Applications/Godot.app` (retires the "Godot app" picker).
+- **Step 2b — external data ✅ (2026-06-14):** Main.gd reads the world dir from the
+  `RIDESIM_WORLD_DIR` env var (absolute path via FileAccess), falling back to bundled
+  `res://data`; a no-data guard renders an empty scene instead of crashing. Export now
+  excludes `data/*` → one **data-agnostic** 187 MB binary serves any baked route.
+  Verified: with the env var it loads the route + binds UDP; without it, graceful
+  empty + still binds UDP.
+- **Next: step 3** — ride_sim launches the bundled exported binary (and sets
+  `RIDESIM_WORLD_DIR` to the baked world dir) instead of `/Applications/Godot.app`
+  (retires the "Godot app" picker; the "World" picker becomes a baked-world dir).
 
 ## Resource usage
 
