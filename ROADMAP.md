@@ -1,6 +1,6 @@
 # Ride Sim — Product Roadmap
 
-_Last updated: 2026-06-14_
+_Last updated: 2026-06-14 (P6 distribution strategy added)_
 
 A planning document spanning the three repos. Living doc — edit freely.
 
@@ -71,12 +71,72 @@ Calendar assumes ~2 sessions/week, part-time.
 | P3 | **Visual polish** | Terrain textures/triplanar; vegetation billboards (`natural=tree`, forest polys); time-of-day sun via solar ephemeris (Shadowmap-style); fog/LOD/cull tuning. | 3–5 |
 | P4 | **Bake UX** ✅ | `bake_world.py`: one command, route (.gpx/.tcx/.fit) → world dir (route+DEM+OSM) **+ matching ride_sim TCX**; progress + per-world tile/OSM caching (offline re-runs). | done |
 | P5 | **Unification** ✅ | Live UDP emitter (ride_sim drives Godot, SIM+BLE) + startup "Ride type" picker (Video / Virtual world) that launches Godot and forces map-drive. | done |
-| P6 | **Distribution** | Godot export templates; PyInstaller for ride_sim; bundle both; offline map tiles; first-run UX. | 3–5 |
+| P6 | **Distribution** | One app, internally modular (see "P6 distribution strategy" below): PyInstaller ride_sim bundling the bake pipeline + an exported Godot renderer; in-app "New Virtual Ride" bakes; baked data in a user dir. Retires the launcher pickers. | 3–5 |
 | P7 | **Video-path hardening** | macOS audio stutter (the hard one — possibly native AVFoundation backend); offline map; Gyroflow stabilization hook. | 3–6 |
 | P8 | **Splat path** _(stretch)_ | Photoreal backend on the same UDP socket. GPU-bound, separate repo. | TBD |
 
 **To a polished offline *unified* app (P1–P7): ~20–35 sessions ≈ 3–4 months part-time.**
 Virtual-world-only milestone (P1–P5): ~11–16 sessions.
+
+## P6 — Distribution strategy (decided 2026-06-14)
+
+**Principle: one app is the single front door; the three concerns stay decoupled
+*internally* (they already talk only through files + the UDP contract), but the
+user never sees or wires up separate tools.** The dev-time "applets" (DEM fetch,
+world build, renderer) become internal steps, not user-facing downloads.
+
+**Three concerns, three lifetimes — and how each is packaged:**
+
+| Concern | Runs | Packaged as |
+|---|---|---|
+| Build a world (route → terrain+OSM+TCX) | once per route, needs network | **internal module**, lazy-imported, run as a **subprocess** from "New Virtual Ride" (progress bar; a bake crash can't take down the ride app). numpy/PIL ride along in the bundle. |
+| Render the world (Godot) | every ride, GPU | **exported native binary** (Godot export templates), **bundled inside** the app; ride_sim launches it over UDP → **retires the "Godot app" / "World project" pickers**. |
+| Brain/ride (BLE, telemetry, HUD, map, recording) | every ride | **the bundle itself** — PyInstaller `.app`/`.exe`. ride_sim is already the brain + the P5 launcher. |
+
+**Artifact layout:**
+```
+RideSim.app/
+  ride_sim            (PyInstaller: brain + bake modules + numpy/PIL)
+  world/RideSimWorld  (exported Godot renderer, launched over UDP)
+~/<app-support>/RideSim/worlds/<route>/   (baked per route, generated on first use,
+                                           never in the bundle — regenerable)
+```
+
+**End-user workflow:**
+1. Install **RideSim** (one download).
+2. *New Virtual Ride* → pick a GPX/TCX/FIT → app bakes (progress; one-time DEM+OSM
+   fetch) → saved to the worlds dir. *(New Video Ride* is the same app.)
+3. Ride → app launches the bundled renderer and drives it; fully offline from here.
+
+**Open trade-off (decide at P6 build time):** bundling the Godot renderer +
+numpy/PIL adds ~100–200 MB that a *video-only* user doesn't need.
+- **Ship bundle-everything first** (recommended — don't optimize size early), then
+- only if size becomes a real complaint, split a downloadable **"Virtual World"
+  component** (renderer + bake deps fetched on first virtual ride). Still one app,
+  one front door, just a deferred install.
+
+**Why not separate applets:** the manual "download DEM tool → run world-maker →
+point ride_sim at the output" dance is exactly the dev-time mess; most users won't
+finish it. The clean internal seams mean unifying costs nothing architecturally.
+
+### P6 progress
+
+- **PyInstaller spike ✅ (2026-06-14, the biggest risk):** the full `ride_sim.py`
+  bundles and launches clean on macOS arm64 (PySide6 6.11, PyInstaller 6.20). A
+  minimal bundled binary proved **QtWebEngine + QtMultimedia both initialize from
+  inside the bundle** — the fragile pieces survive packaging. ride_sim was already
+  `sys._MEIPASS`-aware (Windows-tested), so Windows is likely close too.
+- **Size finding:** the bundle is **~529 MB, and QtWebEngine is ~500 MB of that** —
+  and QtWebEngine is the *Leaflet map*, which lives in the **core** app (every user,
+  even video-only). So the Godot renderer + numpy/PIL are *incremental*. The real
+  size lever is the map, not the world: a later swap to a lighter map (QtLocation /
+  static tiles) would cut ~500 MB. Reframes the "optional component" question.
+- **Offline gap:** the Leaflet map loads JS/CSS from unpkg CDN and tiles from carto
+  — needs internet at ride time. Closing this (bundle Leaflet locally + offline
+  tiles) is a P6/P7 task, separate from the world.
+- **Next: Godot export (step 2).** Blocked on a one-time **export-templates install**
+  (~1 GB, via the editor's Manage Export Templates) + a macOS `export_presets.cfg`.
+  Then ride_sim launches the exported binary instead of `/Applications/Godot.app`.
 
 ## Resource usage
 
