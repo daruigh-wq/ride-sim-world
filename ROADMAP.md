@@ -147,9 +147,15 @@ finish it. The clean internal seams mean unifying costs nothing architecturally.
   excludes `data/*` → one **data-agnostic** 187 MB binary serves any baked route.
   Verified: with the env var it loads the route + binds UDP; without it, graceful
   empty + still binds UDP.
-- **Next: step 3** — ride_sim launches the bundled exported binary (and sets
-  `RIDESIM_WORLD_DIR` to the baked world dir) instead of `/Applications/Godot.app`
-  (retires the "Godot app" picker; the "World" picker becomes a baked-world dir).
+- **Step 3 ✅ (2026-06-14):** ride_sim launches the exported renderer (resolves a
+  `.app` to its inner binary) and points it at the baked world via `RIDESIM_WORLD_DIR`.
+  Pickers simplified: "Godot app" + "project.godot" → **"World app"** (the renderer) +
+  **"World data"** (the baked folder). Verified end-to-end headless: launch → world
+  loads external data + binds UDP:5005.
+- **Next: step 4** — bake-as-subprocess inside "New Virtual Ride" (run `bake_world`
+  with a progress bar, output to a worlds dir → retires the manual bake + the "World
+  data" picker becomes auto). Then **step 5** — bundle assembly (renderer inside the
+  app at a known path → "World app" picker also goes away) + first-run UX.
 
 ## Resource usage
 
