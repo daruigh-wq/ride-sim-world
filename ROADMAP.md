@@ -70,7 +70,7 @@ Calendar assumes ~2 sessions/week, part-time.
 | P2 | **Buildings** ✅ | Extrude OSM `building=*` footprints; height from tag / `levels×3 m` / default; in-road cull. Low-poly town along the flats. | done |
 | P3 | **Visual polish** | Terrain textures/triplanar; vegetation billboards (`natural=tree`, forest polys); time-of-day sun via solar ephemeris (Shadowmap-style); fog/LOD/cull tuning. | 3–5 |
 | P4 | **Bake UX** ✅ | `bake_world.py`: one command, route (.gpx/.tcx/.fit) → world dir (route+DEM+OSM) **+ matching ride_sim TCX**; progress + per-world tile/OSM caching (offline re-runs). | done |
-| P5 | **Unification** | Live UDP emitter ✅ (ride_sim drives Godot, SIM+BLE). **Remaining:** ride_sim startup "which world?" picker + launch Godot for virtual rides. | 1–2 |
+| P5 | **Unification** ✅ | Live UDP emitter (ride_sim drives Godot, SIM+BLE) + startup "Ride type" picker (Video / Virtual world) that launches Godot and forces map-drive. | done |
 | P6 | **Distribution** | Godot export templates; PyInstaller for ride_sim; bundle both; offline map tiles; first-run UX. | 3–5 |
 | P7 | **Video-path hardening** | macOS audio stutter (the hard one — possibly native AVFoundation backend); offline map; Gyroflow stabilization hook. | 3–6 |
 | P8 | **Splat path** _(stretch)_ | Photoreal backend on the same UDP socket. GPU-bound, separate repo. | TBD |

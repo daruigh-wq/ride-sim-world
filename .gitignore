@@ -20,6 +20,7 @@ features.json
 osm_cache.json
 osm_buildings_cache.json
 osm_graph_cache.json
+.bake_osm_route.json
 # per-route working/backup data dirs
 godot/data_*/
 

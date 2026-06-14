@@ -27,6 +27,7 @@ Usage:
   positions but the TCX step (gpx_to_tcx) is what reads .fit/.gpx for the ride.
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -90,6 +91,26 @@ def main():
     run_step(1, total, "route → route.json", [
         TOOLS / "route_to_world.py", route, "--out", route_json])
 
+    # The OSM cache (osm_cache.json) is a single blind file in out-dir; baking a
+    # DIFFERENT route into an existing world dir would silently reuse the wrong
+    # city's OSM. Detect a route change by bbox and force a fresh fetch.
+    sig_file = out / ".bake_osm_route.json"
+    try:
+        bbox = json.loads(route_json.read_text()).get("bbox", {})
+        cur_sig = {k: round(float(v), 4) for k, v in bbox.items()}
+    except Exception:
+        cur_sig = {}
+    prev_sig = {}
+    if sig_file.exists():
+        try:
+            prev_sig = json.loads(sig_file.read_text())
+        except Exception:
+            prev_sig = {}
+    route_changed = bool(prev_sig) and cur_sig != prev_sig
+    do_refetch = args.refetch or route_changed
+    if route_changed and not args.refetch:
+        print("    (route changed since last bake here → refetching OSM)")
+
     run_step(2, total, f"DEM terrain (zoom {args.zoom}, grid {args.grid})", [
         TOOLS / "dem_to_heightmap.py", "--route", route_json, "--out-dir", out,
         "--zoom", args.zoom, "--grid", args.grid, "--margin-m", args.dem_margin_m])
@@ -98,9 +119,13 @@ def main():
            "--margin-m", args.margin_m]
     if args.no_buildings:
         osm.append("--no-buildings")
-    if args.refetch:
+    if do_refetch:
         osm.append("--refetch")
     run_step(3, total, "OSM features (roads / water / landuse / buildings)", osm)
+    try:
+        sig_file.write_text(json.dumps(cur_sig))
+    except Exception:
+        pass
 
     tcx_path = None
     if want_tcx:
