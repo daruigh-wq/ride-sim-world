@@ -14,6 +14,9 @@ extends Node3D
 # Keys: SPACE pause/resume demo, +/- demo speed, ESC quit.
 
 @export var udp_port: int = 5005
+@export var back_port: int = 5006        # back-channel to ride_sim (e.g. Space → pause)
+@export var view_smooth_tau: float = 0.15  # render-distance smoothing (s); eases the
+										 # ~4 Hz packet snaps so the avatar glides. 0 = off
 @export var wait_for_telemetry: bool = true  # hold at the start line until ride_sim's
 										 # first packet (no phantom demo advance / snap-
 										 # back). Untick for standalone route preview.
@@ -67,8 +70,13 @@ var cur_speed: float = 0.0
 var paused := false
 var seg_i := 0             # cached segment index for distance lookup
 var cam_fwd := Vector2.ZERO   # damped camera heading (world x,z); 0 until first frame
+var ghost_live_dist := 0.0    # ride_sim's real ghost position (m), when sent
+var ghost_is_live := false    # true once ride_sim sends ghost_distance_m
+var view_dist := 0.0          # render distance: eases toward dist to hide the
+var view_ghost_dist := 0.0    # ~4 Hz packet snaps (smooth avatar/camera motion)
 
 var udp := PacketPeerUDP.new()
+var back_udp := PacketPeerUDP.new()   # sends commands back to ride_sim
 var cam: Camera3D
 var minimap: Minimap
 var minimap_layer: CanvasLayer
@@ -84,6 +92,7 @@ func _ready() -> void:
 	_build_camera_and_sky()
 	_build_minimap()
 	_build_avatar()
+	back_udp.set_dest_address("127.0.0.1", back_port)
 	if udp.bind(udp_port) == OK:
 		if wait_for_telemetry:
 			print("listening on udp:%d — holding at start until ride_sim connects (untick wait_for_telemetry for standalone demo)" % udp_port)
@@ -669,7 +678,12 @@ func _update_avatar(d: float) -> void:
 	if avatar != null:
 		_place_on_route(avatar, d)
 	if ghost != null:
-		_place_on_route(ghost, fposmod(d + ghost_gap_m, route_len))
+		# When ride_sim sends the real ghost position, follow it; otherwise (demo)
+		# fall back to a fixed gap ahead on the loop.
+		if ghost_is_live:
+			_place_on_route(ghost, clampf(view_ghost_dist, 0.0, route_len))
+		else:
+			_place_on_route(ghost, fposmod(d + ghost_gap_m, route_len))
 
 
 func _place_on_route(node: Node3D, d: float) -> void:
@@ -759,6 +773,9 @@ func _process(delta: float) -> void:
 			dist = float(msg.distance_m)
 			cur_speed = float(msg.get("speed_mps", cur_speed))
 			live = true
+			if msg.has("ghost_distance_m"):
+				ghost_live_dist = float(msg.ghost_distance_m)
+				ghost_is_live = true
 
 	if live:
 		dist += cur_speed * delta          # dead-reckon between packets
@@ -768,14 +785,33 @@ func _process(delta: float) -> void:
 		dist += demo_speed * delta         # standalone demo auto-advance
 
 	if dist >= route_len:
-		dist = 0.0                          # loop the demo
-		seg_i = 0
-	_update_camera(dist, delta)
-	_update_avatar(dist)
+		if live:
+			dist = route_len                # ride_sim owns position: hold at the
+			seg_i = pts.size() - 2          # finish, don't loop or restart
+		else:
+			dist = 0.0                      # loop the standalone demo
+			seg_i = 0
+	elif dist < 0.0:
+		dist = 0.0
+
+	# Ease the render distance toward the authoritative dist so the small ~4 Hz
+	# packet snaps don't jerk the avatar; snap hard on big jumps (scrub/first pkt).
+	if view_smooth_tau > 0.0 and absf(view_dist - dist) <= 50.0:
+		view_dist = lerpf(view_dist, dist, 1.0 - exp(-delta / view_smooth_tau))
+	else:
+		view_dist = dist
+	if ghost_is_live:
+		if view_smooth_tau > 0.0 and absf(view_ghost_dist - ghost_live_dist) <= 50.0:
+			view_ghost_dist = lerpf(view_ghost_dist, ghost_live_dist, 1.0 - exp(-delta / view_smooth_tau))
+		else:
+			view_ghost_dist = ghost_live_dist
+
+	_update_camera(view_dist, delta)
+	_update_avatar(view_dist)
 
 	if minimap != null and minimap_layer.visible:
-		var here := _pos_xz_at(dist)
-		var fwd := _pos_xz_at(dist + 8.0)
+		var here := _pos_xz_at(view_dist)
+		var fwd := _pos_xz_at(view_dist + 8.0)
 		minimap.set_marker(-here.x, here.z, -(fwd.x - here.x), fwd.z - here.z)
 
 
@@ -787,7 +823,12 @@ func _unhandled_input(e: InputEvent) -> void:
 		KEY_ESCAPE:
 			get_tree().quit()
 		KEY_SPACE:
-			paused = not paused
+			if live:
+				# ride_sim owns position; ask it to toggle pause (it freezes us via
+				# speed 0). One-way UDP, so we don't flip local state here.
+				back_udp.put_packet(JSON.stringify({"cmd": "toggle_pause"}).to_utf8_buffer())
+			else:
+				paused = not paused
 		KEY_EQUAL, KEY_KP_ADD:
 			demo_speed = minf(demo_speed + 1.0, 30.0)
 		KEY_MINUS, KEY_KP_SUBTRACT:
