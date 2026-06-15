@@ -31,6 +31,10 @@ extends Node3D
 @export var road_width: float = 8.0
 @export var road_lift: float = 0.5       # sit road just above terrain; finer
 										 # (~11 m) bake means no 5 m floating hack
+@export var road_bank_max_deg: float = 5.0  # cap road cross-slope (camber). On steep
+										 # hillsides draping each edge to its own terrain
+										 # banks the road wildly (45°); this flattens it
+										 # toward the centerline. 0 = dead flat across.
 
 # OSM feature layers (P1) — draped on the terrain like the main road.
 @export var show_roads: bool = true
@@ -356,14 +360,29 @@ func _add_ribbon(st: SurfaceTool, line: PackedVector2Array, hw: float, lift: flo
 		scale = clampf(scale, -hw * 3.0, hw * 3.0)
 		left[i] = line[i] + nrm * scale
 		right[i] = line[i] - nrm * scale
+	# Per-point edge heights with a banking cap: draping each edge to its own
+	# terrain banks the road to the hillside cross-slope (up to ~45°). Limit how
+	# far each edge may sit from the centerline (max_dh = hw*tan(cap)). Raise the
+	# reference so the higher edge is buried at most max_dh — keeps the road from
+	# diving under the uphill bank while staying near-flat across.
+	var max_dh := hw * tan(deg_to_rad(road_bank_max_deg))
+	var ly := PackedFloat32Array(); ly.resize(n)
+	var ry := PackedFloat32Array(); ry.resize(n)
+	for i in range(n):
+		var hc := _terrain_y(line[i].x, line[i].y)
+		var hl := _terrain_y(left[i].x, left[i].y)
+		var hr := _terrain_y(right[i].x, right[i].y)
+		var h_ref := maxf(hc, maxf(hl, hr) - max_dh)
+		ly[i] = clampf(hl, h_ref - max_dh, h_ref + max_dh) + lift
+		ry[i] = clampf(hr, h_ref - max_dh, h_ref + max_dh) + lift
 	var added := false
 	for i in range(n - 1):
 		var l0 := left[i]; var r0 := right[i]
 		var l1 := left[i + 1]; var r1 := right[i + 1]
-		var L0 := Vector3(l0.x, _terrain_y(l0.x, l0.y) + lift, l0.y)
-		var R0 := Vector3(r0.x, _terrain_y(r0.x, r0.y) + lift, r0.y)
-		var L1 := Vector3(l1.x, _terrain_y(l1.x, l1.y) + lift, l1.y)
-		var R1 := Vector3(r1.x, _terrain_y(r1.x, r1.y) + lift, r1.y)
+		var L0 := Vector3(l0.x, ly[i], l0.y)
+		var R0 := Vector3(r0.x, ry[i], r0.y)
+		var L1 := Vector3(l1.x, ly[i + 1], l1.y)
+		var R1 := Vector3(r1.x, ry[i + 1], r1.y)
 		for v in [L0, L1, R0, R0, L1, R1]:
 			st.set_normal(Vector3.UP)
 			st.add_vertex(v)
