@@ -214,6 +214,41 @@ the end-to-end thesis), **then P3** (make it pretty) **then P6** (ship it),
 Rationale: P3 polish on an incomplete world is wasted re-work; getting the full
 data+unification skeleton solid first means polish lands once.
 
+## Design notes (decided 2026-06-14, for P3)
+
+**Adaptive terrain.** Coarse uniform grid is the artifact source on long/hilly
+routes (e.g. the 98 km Santa Cruz route at `--grid 1024` ≈ 36 m cells → faceted
+terrain, road banking/diving). Fix is NOT 1 m DEM (terrarium is already 3DEP-derived
+≈ same data — see [[project-3dep-lidar-deferred]]); it's denser sampling of the
+existing DEM, made cheap by **decoupling lookup from render**:
+- Keep `heights.bin` a **uniform high-res grid** — it only feeds `_terrain_y(x,z)`
+  (O(1) bilinear) for road draping; high res here is ~free (just floats, no verts).
+- Build the **render mesh adaptively** — error-metric / RTIN (restricted quadtree)
+  triangulation: subdivide a cell only while the flat-triangle elevation error
+  exceeds a threshold. Flats collapse to big triangles, complex terrain stays dense.
+- **Corridor-weight** it for the on-rails ride (high detail in a band around the
+  route, low far away) — camera is always on the route, so this is most of the win.
+- A full irregular TIN would break the cheap grid lookup; the hybrid (uniform lookup
+  grid + adaptive render mesh) is the sweet spot. Pairs with corridor bake + LOD.
+- Note (2026-06-14): perf headroom is large — the coarse 98 km world renders flawless
+  at 300 km/h on an M-series/48 GB Mac (static meshes; per-frame cost is camera-only,
+  independent of playback speed). So vert budget for adaptive detail is generous.
+- Banking already capped in code via `road_bank_max_deg` (committed); adaptive terrain
+  reduces the residual diving from mesh-vs-bilinear mismatch.
+
+**UI integration (single vs dual window).** Offer BOTH, don't replace:
+- The HUD pills are already a frameless overlay over the video's native surface;
+  the Godot world is just a different native surface under the same overlay. So
+  pills/map/controls render **identical** — integration changes only what's behind them.
+- Two mechanisms: (A) embed the Godot view into the Qt window's video slot (true one
+  window; cross-process native embedding is the fragile bit on macOS), or (B) overlay
+  the Qt HUD over a borderless fullscreen Godot window (one visual surface; robust,
+  reuses the proven overlay trick). Lean **B**.
+- In the integrated view: hide video-only controls (Video Offset), consolidate the two
+  maps to one (keep the labeled Leaflet, hide the Godot minimap).
+- Keep the **dual-monitor** layout (HUD on laptop, world on external) as a first-class
+  mode — sim-racer-style, the user prefers it.
+
 ## Open risks
 
 - **macOS video audio stutter** (P7) — unsolved; may force a backend change.
