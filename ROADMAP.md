@@ -168,9 +168,16 @@ finish it. The clean internal seams mean unifying costs nothing architecturally.
     consults `RIDESIM_PY_RUNNER` so its sub-tool calls re-exec the same way (no in-process
     refactor). **Verified end-to-end**: a 538 MB PyInstaller build (tools + numpy/PIL/
     fitparse bundled) baked a route through the full app→bake_world→app→sub-tool chain,
-    all 4 steps. Dev path unchanged. **Remaining in 5a:** bundle the renderer inside the
-    app (nested .app needs +x / ad-hoc re-sign preserved) so "World app" auto-resolves
-    frozen; finalize a checked-in `RideSim.spec`.
+    all 4 steps. Dev path unchanged.
+  - **5a ✅ bundle (2026-06-14):** checked-in `ride-sim/RideSim.spec` bundles ride_sim +
+    `tools/` + the exported `RideSimWorld.app` (under `world/`). PyInstaller stores the
+    nested bundle as `RideSimWorld__dot__app` with a `RideSimWorld.app` symlink, so
+    `find_world_app()` resolves it transparently; `_resolve_app_binary` now `chmod +x`'s
+    the inner binary (PyInstaller drops the bit). The nested ad-hoc signature survives,
+    so the bundled renderer runs on arm64. **Verified:** the 633 MB `RideSim.app` launches
+    the bundled renderer headless → loads an external world → binds UDP:5005. So the full
+    one-app (brain + bake + renderer) is assembled. **Remaining:** 5c first-run UX, 5d
+    two-window / single-window integration (offer both per the UI discussion).
   - **5c** — first-run UX (resolve renderer/tools, friendly errors); the "World data"
     picker can default to the last baked world.
   - **5d** — the two-window layout polish (bring-to-front / tile ride_sim + Godot).
