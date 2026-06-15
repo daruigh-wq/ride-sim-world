@@ -152,10 +152,16 @@ finish it. The clean internal seams mean unifying costs nothing architecturally.
   Pickers simplified: "Godot app" + "project.godot" → **"World app"** (the renderer) +
   **"World data"** (the baked folder). Verified end-to-end headless: launch → world
   loads external data + binds UDP:5005.
-- **Next: step 4** — bake-as-subprocess inside "New Virtual Ride" (run `bake_world`
-  with a progress bar, output to a worlds dir → retires the manual bake + the "World
-  data" picker becomes auto). Then **step 5** — bundle assembly (renderer inside the
-  app at a known path → "World app" picker also goes away) + first-run UX.
+- **Step 4 ✅ (2026-06-14):** in-app `BakeWorldDialog` runs `bake_world.py` as a
+  QProcess with live log + a [N/4]-parsed progress bar; output to an app-data worlds
+  dir (`~/Library/Application Support/RideSim/worlds/<route>`). "Bake world from a
+  route…" button in the virtual section; on success it auto-fills **World data** and
+  the matching **TCX**. find_bake_tool() locates the dev sibling (`../ride-sim-world/
+  tools`) or a bundled copy. Verified end-to-end offline (cached SF route).
+- **Next: step 5** — bundle assembly: pull the renderer + bake pipeline INSIDE the
+  PyInstaller app at known paths (`_here/world/RideSimWorld.app`, `_here/tools/`), so
+  "World app" auto-resolves (picker gone) and `sys.executable` baking works frozen
+  (today it relies on the dev venv python). Then first-run UX + the two-window layout.
 
 ## Resource usage
 
