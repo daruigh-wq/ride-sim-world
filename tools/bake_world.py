@@ -23,8 +23,8 @@ Usage:
     python bake_world.py myroute.gpx --out-dir worlds/sf
     python bake_world.py course.fit --reverse --avg 18
 
-* route_to_world reads .gpx/.tcx; a .fit input still bakes terrain/OSM via its
-  positions but the TCX step (gpx_to_tcx) is what reads .fit/.gpx for the ride.
+All three steps read .gpx/.tcx/.fit; --reverse is applied to BOTH route_to_world
+(the world) and gpx_to_tcx (the ride) so they stay in the same direction.
 """
 import argparse
 import json
@@ -88,8 +88,10 @@ def main():
     t_all = time.time()
     print(f"Baking world from {route.name}  →  {out}", flush=True)
 
-    run_step(1, total, "route → route.json", [
-        TOOLS / "route_to_world.py", route, "--out", route_json])
+    route_step = [TOOLS / "route_to_world.py", route, "--out", route_json]
+    if args.reverse:
+        route_step.append("--reverse")
+    run_step(1, total, "route → route.json", route_step)
 
     # The OSM cache (osm_cache.json) is a single blind file in out-dir; baking a
     # DIFFERENT route into an existing world dir would silently reuse the wrong

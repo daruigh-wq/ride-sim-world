@@ -31,8 +31,31 @@ def _strip_ns(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def parse_fit(path):
+    """Return list of (lat, lon, elev) from a FIT file (Garmin/RWGPS course or
+    activity). lat/lon are semicircles; elevation = enhanced_altitude/altitude."""
+    try:
+        import fitparse
+    except ModuleNotFoundError:
+        sys.exit("reading .fit needs the fitparse package: pip install fitparse")
+    SEMI = 180.0 / 2 ** 31
+    pts = []
+    for m in fitparse.FitFile(path).get_messages("record"):
+        d = {f.name: f.value for f in m}
+        la, lo = d.get("position_lat"), d.get("position_long")
+        if la is None or lo is None:
+            continue
+        e = d.get("enhanced_altitude")
+        if e is None:
+            e = d.get("altitude")
+        pts.append((la * SEMI, lo * SEMI, float(e) if e is not None else 0.0))
+    return pts
+
+
 def parse_track(path):
-    """Return list of (lat, lon, elev) from a TCX or GPX file. Namespace-agnostic."""
+    """Return list of (lat, lon, elev) from a TCX, GPX, or FIT file."""
+    if path.lower().endswith(".fit"):
+        return parse_fit(path)
     tree = ET.parse(path)
     root = tree.getroot()
     pts = []
@@ -75,13 +98,17 @@ def haversine(lat1, lon1, lat2, lon2):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("track", help="ride .tcx or .gpx")
+    ap.add_argument("track", help="ride .tcx, .gpx, or .fit")
     ap.add_argument("--out", default="data/route.json")
     ap.add_argument("--min-step-m", type=float, default=2.0,
                     help="drop points closer than this (decimate dense logs)")
+    ap.add_argument("--reverse", action="store_true",
+                    help="reverse the route (match a reversed ride TCX)")
     args = ap.parse_args()
 
     pts = parse_track(args.track)
+    if args.reverse:
+        pts = pts[::-1]
     if len(pts) < 2:
         sys.exit(f"only {len(pts)} trackpoints parsed from {args.track}")
 
