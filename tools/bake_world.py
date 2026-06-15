@@ -39,11 +39,20 @@ REPO = TOOLS.parent
 DEFAULT_DATA = REPO / "godot" / "data"
 
 
+def _py_prefix() -> list:
+    """How to run a bundled .py sub-tool. When ride_sim runs us inside a frozen
+    app it sets RIDESIM_PY_RUNNER=frozen, so sys.executable is the app, not python
+    — re-exec it via the app's --run-pyfile dispatch. Otherwise plain python."""
+    if os.environ.get("RIDESIM_PY_RUNNER") == "frozen":
+        return [sys.executable, "--run-pyfile"]
+    return [sys.executable]
+
+
 def run_step(n: int, total: int, title: str, argv: list) -> None:
     print(f"\n[{n}/{total}] {title}", flush=True)
     print("    $ " + " ".join(str(a) for a in argv), flush=True)
     t0 = time.time()
-    r = subprocess.run([sys.executable] + [str(a) for a in argv], cwd=str(TOOLS))
+    r = subprocess.run(_py_prefix() + [str(a) for a in argv], cwd=str(TOOLS))
     if r.returncode != 0:
         sys.exit(f"\n✗ step failed: {title} (exit {r.returncode}). World not complete.")
     print(f"    ✓ {time.time() - t0:.1f}s", flush=True)

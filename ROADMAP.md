@@ -68,7 +68,7 @@ Calendar assumes ~2 sessions/week, part-time.
 | P0 | **Foundation** ✅ | Pipeline + Godot terrain/road/on-rails camera; chase cam; finer bake | done |
 | P1 | **OSM feature layer** ✅ | `osm_to_features.py` (Overpass, route bbox, same ENU frame). Cross-streets/paths draped & classified (width/color). Water + landuse → terrain tint. | done |
 | P2 | **Buildings** ✅ | Extrude OSM `building=*` footprints; height from tag / `levels×3 m` / default; in-road cull. Low-poly town along the flats. | done |
-| P3 | **Visual polish** | Terrain textures/triplanar; vegetation billboards (`natural=tree`, forest polys); time-of-day sun via solar ephemeris (Shadowmap-style); fog/LOD/cull tuning. | 3–5 |
+| P3 | **Visual polish** | Terrain textures/triplanar; vegetation billboards (`natural=tree`, forest polys); time-of-day sun via solar ephemeris (Shadowmap-style); fog/cull tuning; **adaptive terrain** (uniform lookup grid + error-metric/RTIN render mesh, dense on complex terrain, sparse on flats; corridor-weighted for the on-rails route — see "Adaptive terrain" note); **user-controllable camera** (chase / free-look / orbit / drone; orthogonal to terrain, no IP concern). | 3–5 |
 | P4 | **Bake UX** ✅ | `bake_world.py`: one command, route (.gpx/.tcx/.fit) → world dir (route+DEM+OSM) **+ matching ride_sim TCX**; progress + per-world tile/OSM caching (offline re-runs). | done |
 | P5 | **Unification** ✅ | Live UDP emitter (ride_sim drives Godot, SIM+BLE) + startup "Ride type" picker (Video / Virtual world) that launches Godot and forces map-drive. | done |
 | P6 | **Distribution** | One app, internally modular (see "P6 distribution strategy" below): PyInstaller ride_sim bundling the bake pipeline + an exported Godot renderer; in-app "New Virtual Ride" bakes; baked data in a user dir. Retires the launcher pickers. | 3–5 |
@@ -158,10 +158,22 @@ finish it. The clean internal seams mean unifying costs nothing architecturally.
   route…" button in the virtual section; on success it auto-fills **World data** and
   the matching **TCX**. find_bake_tool() locates the dev sibling (`../ride-sim-world/
   tools`) or a bundled copy. Verified end-to-end offline (cached SF route).
-- **Next: step 5** — bundle assembly: pull the renderer + bake pipeline INSIDE the
-  PyInstaller app at known paths (`_here/world/RideSimWorld.app`, `_here/tools/`), so
-  "World app" auto-resolves (picker gone) and `sys.executable` baking works frozen
-  (today it relies on the dev venv python). Then first-run UX + the two-window layout.
+- **Step 5 — bundle assembly (in progress).** Sub-steps:
+  - **5a** — `RideSim.spec`: bundle ride_sim + the exported `RideSimWorld.app` (under
+    `world/`) + the `tools/` scripts as data; hiddenimports for PIL/fitparse (numpy is
+    already pulled). Auto-resolve "World app" from `_here/world/...` when frozen → that
+    picker disappears.
+  - **5b ✅ frozen bake (2026-06-14):** top-of-`main` `--run-pyfile` dispatch re-execs the
+    frozen app to run a bundled .py; `py_tool_cmd()` builds the invocation; `bake_world`
+    consults `RIDESIM_PY_RUNNER` so its sub-tool calls re-exec the same way (no in-process
+    refactor). **Verified end-to-end**: a 538 MB PyInstaller build (tools + numpy/PIL/
+    fitparse bundled) baked a route through the full app→bake_world→app→sub-tool chain,
+    all 4 steps. Dev path unchanged. **Remaining in 5a:** bundle the renderer inside the
+    app (nested .app needs +x / ad-hoc re-sign preserved) so "World app" auto-resolves
+    frozen; finalize a checked-in `RideSim.spec`.
+  - **5c** — first-run UX (resolve renderer/tools, friendly errors); the "World data"
+    picker can default to the last baked world.
+  - **5d** — the two-window layout polish (bring-to-front / tile ride_sim + Godot).
 
 ## Resource usage
 
