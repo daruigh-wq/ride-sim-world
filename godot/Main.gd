@@ -47,6 +47,18 @@ extends Node3D
 										 # banks the road wildly (45°); this flattens it
 										 # toward the centerline. 0 = dead flat across.
 
+# Road bench (cut/fill the DEM along the route, like a graded roadbed) — kills the
+# "roller-coaster" where steep cross-slopes pumped the leveled road up and down. The
+# terrain is carved to a smoothed centerline grade, so road/rider/camera (all read
+# _terrain_y) sit flat and the hillside meets the road instead of floating/diving.
+@export var carve_road_bench: bool = true
+@export var carve_bench_m: float = 12.0      # flat bench full width (cut to grade)
+@export var carve_blend_m: float = 32.0      # graded shoulder out to original terrain —
+										 # wide enough to grade the cut bank over >1 DEM
+										 # cell so it doesn't wall up / encroach on the road
+@export var carve_grade_smooth_m: float = 45.0  # window to smooth the road grade (m)
+@export var terrain_slope_shading: bool = true  # grey steep faces (rock) vs flats (ground)
+
 # OSM feature layers (P1) — draped on the terrain like the main road.
 @export var show_roads: bool = true
 @export var show_paths: bool = false     # footways/cycleways (~12k ways) — opt in
@@ -85,6 +97,9 @@ var pts: Array = []        # [{x,y,z,d}, ...]
 var route_len: float = 0.0
 var road_center_y := PackedFloat32Array()   # leveled ridden-road center height per pts
 											# index; rider + road share it so nothing buries
+var road_grade := PackedFloat32Array()       # smoothed road elevation per pts index —
+											# the course's OWN recorded grade (not the noisy
+											# DEM); terrain is carved to meet it
 var route_dir := PackedVector2Array()        # unit route heading per pts index (for cull)
 var _route_grid := {}      # Vector2i cell → PackedInt32Array of route indices (cull lookup)
 const ROUTE_CELL := 20.0   # cull grid cell size (m); must exceed cull_overlap_m
@@ -136,6 +151,7 @@ func _ready() -> void:
 	_apply_world_screen()
 	_load_data()
 	if loaded:
+		_carve_road_bench()   # must precede everything that reads _terrain_y
 		_build_terrain()
 		_build_road()
 		_build_features()
@@ -347,6 +363,85 @@ func _elev_color(y: float) -> Color:
 
 # --- mesh building ----------------------------------------------------------
 
+# Cut/fill a graded roadbed into the DEM heightfield along the route (the digital
+# D6 bench). Carving heights[] BEFORE any mesh build means road, rider, camera and
+# features — all of which read _terrain_y — automatically sit on the bench, and the
+# banking-cap leveling becomes a no-op (edges now sample flat ground). This removes
+# the manufactured vertical roller-coaster on steep-walled, near-flat sections.
+# The road's vertical profile. PREFER the route's own recorded elevation (pts.y) —
+# it's the true, smooth grade (a Garmin course / GPS track) — over sampling the DEM,
+# which at coarse cell sizes manufactures hops the road then climbs. Fall back to the
+# DEM only if the course elevation is missing/untrustworthy (far off the terrain).
+# Lightly smoothed over distance to shed any residual jitter.
+func _compute_road_grade() -> void:
+	var n := pts.size()
+	var course := PackedFloat32Array(); course.resize(n)
+	var demc := PackedFloat32Array(); demc.resize(n)
+	var diff := 0.0
+	for i in range(n):
+		course[i] = float(pts[i].y)
+		demc[i] = _terrain_y(float(pts[i].x), float(pts[i].z))
+		diff += absf(course[i] - demc[i])
+	diff /= float(maxi(1, n))
+	var use_course := diff < 40.0   # course tracks the terrain → it's real elevation
+	var src := course if use_course else demc
+	road_grade = PackedFloat32Array(); road_grade.resize(n)
+	var half_win := carve_grade_smooth_m * 0.5
+	var j0 := 0
+	var j1 := 0
+	for i in range(n):
+		var di := float(pts[i].d)
+		while j0 < n - 1 and float(pts[j0].d) < di - half_win:
+			j0 += 1
+		while j1 < n - 1 and float(pts[j1 + 1].d) <= di + half_win:
+			j1 += 1
+		var acc := 0.0
+		for k in range(j0, j1 + 1):
+			acc += src[k]
+		road_grade[i] = acc / float(maxi(1, j1 - j0 + 1))
+	print("road grade: %s source (mean |course-DEM| = %.1f m)" % [
+		"course" if use_course else "DEM", diff])
+
+
+func _carve_road_bench() -> void:
+	if not carve_road_bench or pts.is_empty() or heights.is_empty():
+		return
+	var n := pts.size()
+	_compute_road_grade()   # fills road_grade (course elevation preferred over DEM)
+	# Stamp the corridor into heights[] (nearest route station wins per cell):
+	#    flat bench within half-width, smoothstep back to original over the shoulder.
+	var orig := heights.duplicate()
+	var bench_hw := carve_bench_m * 0.5
+	var reach := bench_hw + carve_blend_m
+	var best := PackedFloat32Array(); best.resize(gw * gh); best.fill(INF)
+	var rad_c := int(ceil(reach / absf(mpp_x))) + 1
+	var rad_r := int(ceil(reach / absf(mpp_z))) + 1
+	for i in range(n):
+		var wx := float(pts[i].x)
+		var wz := float(pts[i].z)
+		var g := road_grade[i]
+		var cc := int(floor((-wx - x0) / mpp_x))
+		var rc := int(floor((wz - z0) / mpp_z))
+		for r in range(maxi(rc - rad_r, 0), mini(rc + rad_r, gh - 1) + 1):
+			for c in range(maxi(cc - rad_c, 0), mini(cc + rad_c, gw - 1) + 1):
+				var cellx := -(x0 + c * mpp_x)
+				var cellz := z0 + r * mpp_z
+				var dlat := sqrt((cellx - wx) * (cellx - wx) + (cellz - wz) * (cellz - wz))
+				if dlat > reach:
+					continue
+				var idx := r * gw + c
+				if dlat >= best[idx]:
+					continue
+				best[idx] = dlat
+				if dlat <= bench_hw:
+					heights[idx] = g
+				else:
+					var w := smoothstep(0.0, 1.0, (dlat - bench_hw) / carve_blend_m)
+					heights[idx] = lerpf(g, orig[idx], w)
+	print("carved road bench: %d stations, bench %.0fm + %.0fm shoulder" % [
+		n, carve_bench_m, carve_blend_m])
+
+
 func _build_terrain() -> void:
 	var verts := PackedVector3Array(); verts.resize(gw * gh)
 	var norms := PackedVector3Array(); norms.resize(gw * gh)
@@ -357,13 +452,20 @@ func _build_terrain() -> void:
 			var i := r * gw + c
 			var y := heights[i]
 			verts[i] = Vector3(-(x0 + c * mpp_x), y, z0 + r * mpp_z)   # East negated
-			cols[i] = _elev_color(y)
 			# normal from heightfield central differences (X-comp flips with East)
 			var cl := maxi(c - 1, 0); var cr := mini(c + 1, gw - 1)
 			var ru := maxi(r - 1, 0); var rd := mini(r + 1, gh - 1)
 			var dydx := (heights[r * gw + cr] - heights[r * gw + cl]) / ((cr - cl) * mpp_x)
 			var dydz := (heights[rd * gw + c] - heights[ru * gw + c]) / ((rd - ru) * mpp_z)
-			norms[i] = Vector3(dydx, 1.0, -dydz).normalized()
+			var nrm := Vector3(dydx, 1.0, -dydz).normalized()
+			norms[i] = nrm
+			# Slope shading: grey out steep faces (rock/cut bank) vs green-tan flats,
+			# so canyon walls read as walls. nrm.y = 1 flat → 0 vertical.
+			var col := _elev_color(y)
+			if terrain_slope_shading:
+				var steep := clampf((1.0 - nrm.y - 0.22) / 0.5, 0.0, 1.0)
+				col = col.lerp(Color(0.34, 0.31, 0.29), steep * 0.8)
+			cols[i] = col
 
 	var idx := PackedInt32Array()
 	for r in range(gh - 1):
@@ -458,6 +560,13 @@ func _nearest_route(p: Vector2) -> int:
 func _compute_road_center_y() -> void:
 	var n := pts.size()
 	road_center_y = PackedFloat32Array(); road_center_y.resize(n)
+	# When the bench carve ran, the road rides its course-derived grade and the
+	# terrain was carved to meet it — use it directly (no DEM leveling needed).
+	if road_grade.size() == n and not road_grade.is_empty():
+		for i in range(n):
+			road_center_y[i] = road_grade[i]
+		return
+	# Fallback (carve disabled): the old DEM banking-cap leveling.
 	var hw := road_width * 0.5
 	var max_dh := hw * tan(deg_to_rad(road_bank_max_deg))
 	for i in range(n):

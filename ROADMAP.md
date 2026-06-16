@@ -236,6 +236,22 @@ existing DEM, made cheap by **decoupling lookup from render**:
 - Banking already capped in code via `road_bank_max_deg` (committed); adaptive terrain
   reduces the residual diving from mesh-vs-bilinear mismatch.
 
+**Road bench carve + course-elevation grade (DONE 2026-06-16).** Replaced per-edge
+banking-cap leveling with: (1) road grade = the route's OWN recorded elevation
+(`pts.y`, smooth) instead of the coarse/noisy DEM — the DEM manufactured vertical hops
+(verified: +6.4 m DEM spike at Malibu d=2650 where the real course is flat). Falls back
+to DEM if course elevation is >40 m off the terrain. (2) `_carve_road_bench` cuts/fills
+a graded roadbed into `heights.bin` along the route corridor (flat bench + smoothstep
+shoulder) so road/rider/camera (all read `_terrain_y`) sit flat and terrain meets the
+road. Plus slope-aware terrain shading (grey rock on steep faces).
+- Residual: "mudslide" bleed-through where a coarse DEM cell (Malibu world = 23 m/cell,
+  83 km route @ 1024 grid) has no vertex inside the bench to pin → terrain triangle
+  leans over the road. Mitigated by a wider shoulder (bench 12 m, blend 32 m). The clean
+  fix is stitching road-edge verts into the terrain mesh — see [[project-terrain-road-stitch]].
+- Lever: `--grid` controls heightfield SIZE/detail (NOT download); `--zoom` controls DEM
+  tile DOWNLOAD. The Malibu 23 m grid is coarser than the zoom-14 ~7.6 m source, so just
+  raising `--grid` recovers detail from already-fetched tiles.
+
 **UI integration (single vs dual window).** Offer BOTH, don't replace:
 - The HUD pills are already a frameless overlay over the video's native surface;
   the Godot world is just a different native surface under the same overlay. So
