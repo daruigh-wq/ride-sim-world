@@ -98,6 +98,7 @@ extends Node3D
 										 # load; densifies coarse OSM-routed paths. 0 = off
 @export var route_smooth: int = 3        # centerline moving-average radius (pts);
 										 # smooths GPS jitter / stop-light loops. 0 = off
+@export var show_perf: bool = true       # top-left fps / frame-time / draw-call readout (toggle: P)
 @export var show_minimap: bool = true    # north-up route map overlay (toggle: M)
 @export var minimap_size: int = 480      # minimap square size in px
 @export var show_avatar: bool = true     # rider marker following the path
@@ -150,6 +151,8 @@ var orbit_pitch_deg := 30.0   # look-down pitch (deg), clamped 1..89
 var orbit_dist := 22.0        # camera distance from the rider (m)
 var mouse_orbiting := false   # right-button drag orbits in DRONE/FREE
 var cam_label: Label
+var perf_label: Label             # fps / frame-time / draw-call readout (P)
+var _perf_accum := 0.0            # throttle the perf text refresh (~4 Hz)
 var auto_ghost := false       # show a synthetic pace ghost when none is live (G)
 var seek_input: LineEdit      # J: type a km to jump to (test singularities)
 
@@ -1612,6 +1615,17 @@ func _build_camera_and_sky() -> void:
 	cl.add_child(cam_label)
 	_update_cam_label()
 
+	# Top-left perf readout: fps / frame-time / draw calls / primitives (P toggles).
+	perf_label = Label.new()
+	perf_label.offset_left = 24.0; perf_label.offset_top = 16.0
+	perf_label.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6))
+	perf_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	perf_label.add_theme_constant_override("outline_size", 8)
+	perf_label.add_theme_font_size_override("font_size", 64)
+	perf_label.visible = show_perf
+	cl.add_child(perf_label)
+	_update_perf_label()
+
 	# Hidden km-jump box (J): type a distance to teleport to for artifact hunting.
 	seek_input = LineEdit.new()
 	seek_input.placeholder_text = "jump to km…"
@@ -1899,6 +1913,19 @@ func _update_cam_label() -> void:
 		names[cam_mode], "ON" if auto_ghost else "OFF"]
 
 
+func _update_perf_label() -> void:
+	if perf_label == null:
+		return
+	var fps := Engine.get_frames_per_second()
+	var ms := 1000.0 / maxf(fps, 1.0)
+	var draws := RenderingServer.get_rendering_info(
+		RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+	var prims := RenderingServer.get_rendering_info(
+		RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)
+	perf_label.text = "%d fps   %.1f ms   |   %d draws   %.1fM prims" % [
+		int(round(fps)), ms, draws, float(prims) / 1000000.0]
+
+
 # Teleport to a route distance and hold there — for inspecting singularities at a
 # known km. Effective standalone; in a ride_sim-driven ride the next packet wins.
 func _seek_to_km(km: float) -> void:
@@ -1921,6 +1948,10 @@ func _on_seek_submitted(text: String) -> void:
 # --- main loop --------------------------------------------------------------
 
 func _process(delta: float) -> void:
+	_perf_accum += delta
+	if _perf_accum >= 0.25:
+		_perf_accum = 0.0
+		_update_perf_label()
 	# Held-key camera steering (DRONE/FREE): smooth orbit + zoom.
 	if cam_mode == CamMode.DRONE or cam_mode == CamMode.FREE:
 		var rs := 60.0 * delta
@@ -2047,6 +2078,10 @@ func _unhandled_input(e: InputEvent) -> void:
 		KEY_M:
 			if minimap_layer != null:
 				minimap_layer.visible = not minimap_layer.visible
+		KEY_P:
+			show_perf = not show_perf
+			if perf_label != null:
+				perf_label.visible = show_perf
 
 
 # --- minimap overlay --------------------------------------------------------
