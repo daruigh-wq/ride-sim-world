@@ -46,9 +46,9 @@ OVERPASS_URLS = [
 
 
 def build_query(s, w, n, e):
-    """Overpass QL: roads, waterways, water bodies, land cover in the bbox."""
+    """Overpass QL: roads, waterways, water, land cover, barriers, power, coast."""
     bb = f"({s},{w},{n},{e})"
-    return f"""[out:json][timeout:120];
+    return f"""[out:json][timeout:180];
 (
   way["highway"]{bb};
   way["waterway"]{bb};
@@ -56,6 +56,11 @@ def build_query(s, w, n, e):
   way["landuse"]{bb};
   way["leisure"~"park|nature_reserve|golf_course|pitch"]{bb};
   way["natural"="wood"]{bb};
+  way["barrier"~"fence|hedge|wall|dry_stone_wall|retaining_wall"]{bb};
+  way["power"~"line|minor_line"]{bb};
+  node["power"~"tower|pole"]{bb};
+  way["natural"="coastline"]{bb};
+  way["natural"="beach"]{bb};
 );
 (._;>;);
 out body qt;
@@ -162,6 +167,14 @@ def classify(tags):
     """(kind, class) for a way, or (None, None) to skip. kind drives geometry."""
     if "highway" in tags:
         return "road", tags["highway"]
+    if "barrier" in tags:
+        return "barrier", tags["barrier"]
+    if tags.get("power") in ("line", "minor_line"):
+        return "powerline", tags["power"]
+    if tags.get("natural") == "coastline":
+        return "coastline", "coastline"
+    if tags.get("natural") == "beach":
+        return "beach", "beach"
     if "waterway" in tags:
         return "waterway", tags["waterway"]
     if tags.get("natural") == "water":
@@ -222,7 +235,14 @@ def main():
                 round((lat - lat0) * M_PER_DEG, 1)]
 
     out = {"origin": {"lat": lat0, "lon": lon0},
-           "roads": [], "waterways": [], "water": [], "landuse": [], "buildings": []}
+           "roads": [], "waterways": [], "water": [], "landuse": [], "buildings": [],
+           "barriers": [], "powerlines": [], "coastline": [], "beach": [],
+           "power_poles": []}
+
+    # kind -> output list for polyline / polygon features
+    line_dest = {"road": "roads", "waterway": "waterways", "barrier": "barriers",
+                 "powerline": "powerlines", "coastline": "coastline"}
+    area_dest = {"water": "water", "landuse": "landuse", "beach": "beach"}
 
     for way in ways:
         tags = way.get("tags", {})
@@ -234,18 +254,23 @@ def main():
         if len(pts) < 2:
             continue
 
-        if kind in ("road", "waterway"):
-            out[kind + "s" if kind == "road" else "waterways"].append(
-                {"class": cls, "pts": pts})
-        else:  # area: water / landuse — needs a closed ring of >=3 distinct pts
+        if kind in line_dest:
+            entry = {"class": cls, "pts": pts}
+            if kind == "road" and "bridge" in tags and tags["bridge"] != "no":
+                entry["bridge"] = True
+            out[line_dest[kind]].append(entry)
+        else:  # area: water / landuse / beach — needs a closed ring of >=3 distinct pts
             if len(pts) < 4:
                 continue
             if pts[0] != pts[-1]:
                 pts.append(pts[0])          # close the ring
-            if kind == "water":
-                out["water"].append({"pts": pts})
-            else:
-                out["landuse"].append({"class": cls, "pts": pts})
+            out[area_dest[kind]].append(
+                {"pts": pts} if kind == "water" else {"class": cls, "pts": pts})
+
+    # Power towers/poles are standalone tagged NODES, not ways.
+    for el in data.get("elements", []):
+        if el["type"] == "node" and el.get("tags", {}).get("power") in ("tower", "pole"):
+            out["power_poles"].append(proj(el["lat"], el["lon"]))
 
     # Buildings: separate query/cache (huge), kept only near the route so dense
     # urban bboxes don't explode the mesh. Grid-bin the route, keep a building if
@@ -316,6 +341,9 @@ def main():
     print(f"roads {len(out['roads'])}  waterways {len(out['waterways'])}  "
           f"water {len(out['water'])}  landuse {len(out['landuse'])}  "
           f"buildings {len(out['buildings'])}")
+    print(f"barriers {len(out['barriers'])}  powerlines {len(out['powerlines'])}  "
+          f"poles {len(out['power_poles'])}  coastline {len(out['coastline'])}  "
+          f"beach {len(out['beach'])}")
     print(f"  -> {path}")
 
 

@@ -59,14 +59,35 @@ extends Node3D
 @export var carve_grade_smooth_m: float = 45.0  # window to smooth the road grade (m)
 @export var terrain_slope_shading: bool = true  # grey steep faces (rock) vs flats (ground)
 
+# Terrain<->road stitch: the uniform grid only pins heights at its vertices, so on a
+# coarse bake a cell wider than the bench has no vertex inside the road and its triangle
+# leans over it ("mudslide" bleed). The carve (below) now solves this in the HEIGHTFIELD
+# domain — it pins the cells bracketing the road to grade, so no triangle can lean over.
+#
+# The apron below was an earlier GEOMETRY-domain attempt (delete the route's grid cells,
+# fill the gap with an offset shoulder ribbon). It self-folded on switchback terrain whose
+# turn radius < the ~21 m outer offset (offset ribbons always self-intersect there) and the
+# steep-cross-slope drape read as translucent "fogbank" sheets. Parked OFF by default; the
+# carve-domain stitch is the robust primitive (pure heights[] edits can't go non-manifold).
+@export var road_apron: bool = false
+@export var apron_reach_m: float = 10.0   # lateral half-extent the apron covers = hole radius
+
 # OSM feature layers (P1) — draped on the terrain like the main road.
 @export var show_roads: bool = true
-@export var show_paths: bool = false     # footways/cycleways (~12k ways) — opt in
-@export var show_service: bool = false   # driveways/parking aisles (~8.5k) — opt in
+@export var show_paths: bool = true      # footways/cycleways/tracks — farm-road web
+@export var show_service: bool = true    # driveways/ranch/service roads
 @export var show_water: bool = true
 @export var show_landuse: bool = true
+@export var show_trees: bool = true      # scatter low-poly trees in OSM forest/wood polys
+@export var tree_spacing_m: float = 14.0 # ~one tree per this much area (smaller = denser)
+@export var tree_height_m: float = 28.0  # base tree height (redwood-tall); per-instance ×0.6–1.5
+@export var tree_max: int = 60000        # global instance cap (perf)
 @export var show_buildings: bool = true  # extruded OSM footprints near the route
 @export var building_height_scale: float = 1.0
+@export var show_barriers: bool = true   # OSM fences / hedges / walls (vertical strips)
+@export var show_power: bool = true      # OSM power lines + poles
+@export var power_height: float = 9.0    # pole height / wire elevation (m)
+@export var show_bridges: bool = true    # decks + railings on bridge=yes road spans
 @export var feature_lift: float = 0.3    # cross-streets sit just below the ridden road
 @export var cull_route_overlap: bool = true  # hide the OSM road that runs parallel UNDER
 										 # the ridden route (kills the double-road) while
@@ -101,6 +122,11 @@ var road_grade := PackedFloat32Array()       # smoothed road elevation per pts i
 											# the course's OWN recorded grade (not the noisy
 											# DEM); terrain is carved to meet it
 var route_dir := PackedVector2Array()        # unit route heading per pts index (for cull)
+var carve_cut := PackedFloat32Array()        # per terrain cell: 0=natural ground, 1=fresh
+											# carved cut bank (→ dirt in the terrain shader)
+var _noise_tex: NoiseTexture2D               # shared procedural grain (lazy, no shipped asset)
+var _features: Dictionary = {}               # parsed features.json (lazy; terrain + features use it)
+var _features_loaded: bool = false
 var _route_grid := {}      # Vector2i cell → PackedInt32Array of route indices (cull lookup)
 const ROUTE_CELL := 20.0   # cull grid cell size (m); must exceed cull_overlap_m
 
@@ -155,6 +181,7 @@ func _ready() -> void:
 		_build_terrain()
 		_build_road()
 		_build_features()
+		_build_trees()
 	_build_camera_and_sky()
 	if loaded:
 		_build_minimap()
@@ -173,6 +200,7 @@ func _ready() -> void:
 	if loaded:
 		var sk := OS.get_environment("RIDESIM_WORLD_SEEK_KM")
 		if sk != "":
+			wait_for_telemetry = false   # standalone inspection: SPACE rides the demo
 			_seek_to_km(sk.to_float())
 
 
@@ -361,6 +389,246 @@ func _elev_color(y: float) -> Color:
 	return tan.lerp(gray, (t - 0.5) / 0.5)
 
 
+# --- procedural materials (triplanar noise, no shipped image assets) --------
+
+# One shared tileable simplex texture, generated at load (FastNoiseLite). Both the
+# terrain and tarmac shaders sample it triplanar in world space for grain.
+func _grain_noise() -> NoiseTexture2D:
+	if _noise_tex != null:
+		return _noise_tex
+	var fn := FastNoiseLite.new()
+	fn.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	fn.frequency = 0.05
+	fn.fractal_octaves = 4
+	var nt := NoiseTexture2D.new()
+	nt.noise = fn
+	nt.seamless = true
+	nt.width = 256
+	nt.height = 256
+	_noise_tex = nt
+	return nt
+
+
+# Terrain: biome base (vertex COLOR.rgb) + slope-rock greying + procedural grain +
+# dirt on carved cut banks (vertex COLOR.a). cull_disabled — East-negation flips winding.
+const TERRAIN_SHADER := """
+shader_type spatial;
+render_mode cull_disabled;
+uniform sampler2D detail_noise : repeat_enable;
+uniform float detail_scale = 0.06;
+uniform float detail_amt = 0.30;
+uniform float slope_shade = 1.0;
+uniform vec3 rock_color : source_color = vec3(0.34, 0.31, 0.29);
+uniform vec3 dirt_color : source_color = vec3(0.43, 0.33, 0.22);
+varying vec3 w_pos;
+varying vec3 w_nrm;
+void vertex() {
+	w_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	w_nrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+}
+void fragment() {
+	vec3 bw = abs(w_nrm);
+	bw /= (bw.x + bw.y + bw.z + 0.0001);
+	float nx = texture(detail_noise, w_pos.zy * detail_scale).r;
+	float ny = texture(detail_noise, w_pos.xz * detail_scale).r;
+	float nz = texture(detail_noise, w_pos.xy * detail_scale).r;
+	float detail = nx * bw.x + ny * bw.y + nz * bw.z;
+	vec3 col = COLOR.rgb;
+	float slope = clamp(1.0 - w_nrm.y, 0.0, 1.0);
+	float rockf = smoothstep(0.22, 0.72, slope) * 0.85 * slope_shade;
+	col = mix(col, rock_color, rockf);
+	col = mix(col, dirt_color, COLOR.a);
+	col *= (1.0 - detail_amt) + detail_amt * 2.0 * detail;
+	ALBEDO = col;
+	ROUGHNESS = 1.0;
+}
+"""
+
+
+func _terrain_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = TERRAIN_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	mat.set_shader_parameter("detail_noise", _grain_noise())
+	mat.set_shader_parameter("slope_shade", 1.0 if terrain_slope_shading else 0.0)
+	return mat
+
+
+# Asphalt: dark tarmac with a fine procedural grain (road is near-planar → xz mapping).
+const TARMAC_SHADER := """
+shader_type spatial;
+render_mode cull_disabled;
+uniform sampler2D grain_noise : repeat_enable;
+uniform float grain_scale = 0.25;
+uniform vec3 tarmac : source_color = vec3(0.17, 0.17, 0.19);
+varying vec3 w_pos;
+void vertex() { w_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }
+void fragment() {
+	float g = texture(grain_noise, w_pos.xz * grain_scale).r;
+	float g2 = texture(grain_noise, w_pos.xz * grain_scale * 4.0).r;
+	float n = mix(g, g2, 0.5);
+	ALBEDO = tarmac * (0.78 + 0.50 * n);
+	ROUGHNESS = 0.9 - 0.18 * n;
+}
+"""
+
+
+func _tarmac_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = TARMAC_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	mat.set_shader_parameter("grain_noise", _grain_noise())
+	return mat
+
+
+# Parse features.json once (terrain landuse bake + _build_features both read it).
+func _load_features() -> Dictionary:
+	if _features_loaded:
+		return _features
+	_features_loaded = true
+	if not FileAccess.file_exists(_dpath("features.json")):
+		return _features
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(_dpath("features.json")))
+	if typeof(parsed) == TYPE_DICTIONARY:
+		_features = parsed
+	return _features
+
+
+# Rasterize OSM landuse polygons into a per-terrain-cell tint (alpha>0 where covered),
+# so landcover is baked INTO the terrain mesh (conformed, opaque) instead of floating as a
+# translucent draped overlay (which read as a green stripe / "fog over the road"). bbox-
+# culled point-in-polygon per cell — cheap for the usual many-small-parcels case.
+func _landuse_grid() -> PackedColorArray:
+	var tint := PackedColorArray(); tint.resize(gw * gh)   # default Color(0,0,0,0)
+	if not show_landuse:
+		return tint
+	for lu in _load_features().get("landuse", []):
+		var pts_arr = _flipx(lu["pts"])
+		var poly := PackedVector2Array()
+		var minc := gw; var maxc := -1; var minr := gh; var maxr := -1
+		for p in pts_arr:
+			var px := float(p[0]); var pz := float(p[1])
+			poly.append(Vector2(px, pz))
+			var cf := (-px - x0) / mpp_x
+			var rf := (pz - z0) / mpp_z
+			minc = mini(minc, int(floor(cf))); maxc = maxi(maxc, int(ceil(cf)))
+			minr = mini(minr, int(floor(rf))); maxr = maxi(maxr, int(ceil(rf)))
+		if poly.size() < 3:
+			continue
+		minc = maxi(minc, 0); maxc = mini(maxc, gw - 1)
+		minr = maxi(minr, 0); maxr = mini(maxr, gh - 1)
+		var col := _landuse_color(lu["class"])
+		for r in range(minr, maxr + 1):
+			for c in range(minc, maxc + 1):
+				var wx := -(x0 + c * mpp_x)
+				var wz := z0 + r * mpp_z
+				if Geometry2D.is_point_in_polygon(Vector2(wx, wz), poly):
+					tint[r * gw + c] = Color(col.r, col.g, col.b, 1.0)
+	return tint
+
+
+# A single low-poly tree: a square trunk + a faceted cone canopy, two surfaces (brown /
+# green) so one MultiMesh can draw thousands cheaply. Local origin at the trunk base (y=0).
+func _make_tree_mesh() -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	var h := tree_height_m
+	var th := h * 0.40                              # bare trunk portion (redwood-tall)
+	var tw := maxf(0.22, h * 0.016)                 # trunk half-width
+	var tr := SurfaceTool.new(); tr.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var corners := [Vector2(-tw, -tw), Vector2(tw, -tw), Vector2(tw, tw), Vector2(-tw, tw)]
+	for i in range(4):
+		var a2: Vector2 = corners[i]
+		var b2: Vector2 = corners[(i + 1) % 4]
+		var a0 := Vector3(a2.x, 0.0, a2.y); var b0 := Vector3(b2.x, 0.0, b2.y)
+		var a1 := Vector3(a2.x, th, a2.y); var b1 := Vector3(b2.x, th, b2.y)
+		for v in [a0, a1, b0, b0, a1, b1]:
+			tr.add_vertex(v)
+	tr.generate_normals()
+	tr.commit(mesh)
+	var cn := SurfaceTool.new(); cn.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var cr := maxf(1.5, h * 0.13)                   # slender canopy radius (redwood profile)
+	var cb := th * 0.70                             # canopy base (overlaps trunk top)
+	var apex := Vector3(0.0, h, 0.0)
+	var sides := 8
+	for i in range(sides):
+		var a := TAU * float(i) / float(sides)
+		var b := TAU * float(i + 1) / float(sides)
+		var p0 := Vector3(cos(a) * cr, cb, sin(a) * cr)
+		var p1 := Vector3(cos(b) * cr, cb, sin(b) * cr)
+		for v in [p0, apex, p1]:
+			cn.add_vertex(v)
+		for v in [p0, p1, Vector3(0.0, cb, 0.0)]:   # base cap (so it's not see-through)
+			cn.add_vertex(v)
+	cn.generate_normals()
+	cn.commit(mesh)
+	var mt := StandardMaterial3D.new(); mt.albedo_color = Color(0.30, 0.23, 0.15); mt.roughness = 1.0
+	var mc := StandardMaterial3D.new(); mc.albedo_color = Color(0.19, 0.34, 0.17); mc.roughness = 1.0
+	mesh.surface_set_material(0, mt)
+	mesh.surface_set_material(1, mc)
+	return mesh
+
+
+# Scatter trees inside OSM forest/wood polygons (rejection-sampled, draped to terrain, kept
+# off the road), as one MultiMeshInstance3D. Seeded RNG → stable placement across runs.
+func _build_trees() -> void:
+	if not show_trees:
+		return
+	var polys := []
+	for lu in _load_features().get("landuse", []):
+		var cls = lu["class"]
+		# forest/wood = trees; nature_reserve = open-space preserves, densely wooded in
+		# redwood country (the largest treed land in many routes — don't skip it).
+		if cls == "forest" or cls == "wood" or cls == "nature_reserve":
+			polys.append(_flipx(lu["pts"]))
+	if polys.is_empty():
+		print("trees: no forest/wood landuse in this world")
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20260618
+	var xforms: Array[Transform3D] = []
+	for poly_arr in polys:
+		if xforms.size() >= tree_max:
+			break
+		var poly := PackedVector2Array()
+		var minx := INF; var maxx := -INF; var minz := INF; var maxz := -INF
+		for p in poly_arr:
+			var px := float(p[0]); var pz := float(p[1])
+			poly.append(Vector2(px, pz))
+			minx = minf(minx, px); maxx = maxf(maxx, px)
+			minz = minf(minz, pz); maxz = maxf(maxz, pz)
+		if poly.size() < 3:
+			continue
+		var target := int((maxx - minx) * (maxz - minz) / (tree_spacing_m * tree_spacing_m))
+		target = mini(target, 20000)                # per-poly cap (big preserves fill in)
+		for k in range(target):
+			if xforms.size() >= tree_max:
+				break
+			var x := rng.randf_range(minx, maxx)
+			var z := rng.randf_range(minz, maxz)
+			if not Geometry2D.is_point_in_polygon(Vector2(x, z), poly):
+				continue
+			var ni := _nearest_route(Vector2(x, z))  # keep trees off the road
+			if ni >= 0 and Vector2(x, z).distance_to(Vector2(float(pts[ni].x), float(pts[ni].z))) < road_width:
+				continue
+			var basis := Basis().scaled(Vector3.ONE * rng.randf_range(0.6, 1.5))
+			basis = basis.rotated(Vector3.UP, rng.randf() * TAU)
+			xforms.append(Transform3D(basis, Vector3(x, _terrain_y(x, z), z)))
+	if xforms.is_empty():
+		return
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _make_tree_mesh()
+	mm.instance_count = xforms.size()
+	for i in range(xforms.size()):
+		mm.set_instance_transform(i, xforms[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	add_child(mmi)
+	print("trees: %d instances across %d forest/wood polys" % [xforms.size(), polys.size()])
+
+
 # --- mesh building ----------------------------------------------------------
 
 # Cut/fill a graded roadbed into the DEM heightfield along the route (the digital
@@ -411,9 +679,16 @@ func _carve_road_bench() -> void:
 	# Stamp the corridor into heights[] (nearest route station wins per cell):
 	#    flat bench within half-width, smoothstep back to original over the shoulder.
 	var orig := heights.duplicate()
-	var bench_hw := carve_bench_m * 0.5
+	# Pin a flat bench at least one grid cell wider than the road on each side: this
+	# guarantees the terrain verts BRACKETING the road sit AT road level, so no triangle
+	# can lean over the road edge ("mudslide" bleed) — the heightfield-domain stitch that
+	# replaces the offset apron ribbon (which self-folded on switchbacks). Pure heights[]
+	# edits can't self-intersect. Cost: a slightly wider flat cut on coarse bakes.
+	var cell_diag := sqrt(mpp_x * mpp_x + mpp_z * mpp_z)
+	var bench_hw := maxf(carve_bench_m * 0.5, road_width * 0.5 + cell_diag)
 	var reach := bench_hw + carve_blend_m
 	var best := PackedFloat32Array(); best.resize(gw * gh); best.fill(INF)
+	carve_cut = PackedFloat32Array(); carve_cut.resize(gw * gh); carve_cut.fill(0.0)
 	var rad_c := int(ceil(reach / absf(mpp_x))) + 1
 	var rad_r := int(ceil(reach / absf(mpp_z))) + 1
 	for i in range(n):
@@ -433,6 +708,9 @@ func _carve_road_bench() -> void:
 				if dlat >= best[idx]:
 					continue
 				best[idx] = dlat
+				# cut-bank factor: full dirt across the bench, fading to natural ground by
+				# the shoulder edge (nearest station wins, same as the height stamp).
+				carve_cut[idx] = 1.0 - smoothstep(bench_hw, reach, dlat)
 				if dlat <= bench_hw:
 					heights[idx] = g
 				else:
@@ -446,6 +724,7 @@ func _build_terrain() -> void:
 	var verts := PackedVector3Array(); verts.resize(gw * gh)
 	var norms := PackedVector3Array(); norms.resize(gw * gh)
 	var cols := PackedColorArray(); cols.resize(gw * gh)
+	var lu := _landuse_grid()   # OSM landcover baked into the mesh (conformed, opaque)
 
 	for r in range(gh):
 		for c in range(gw):
@@ -461,15 +740,24 @@ func _build_terrain() -> void:
 			norms[i] = nrm
 			# Slope shading: grey out steep faces (rock/cut bank) vs green-tan flats,
 			# so canyon walls read as walls. nrm.y = 1 flat → 0 vertical.
+			# Vertex color carries the biome base (rgb, elevation ramp) + the carve cut-bank
+			# factor (alpha). Slope-rock greying, procedural grain, and the dirt cut bank are
+			# applied per-fragment in the terrain shader (triplanar, procedural — no assets).
 			var col := _elev_color(y)
-			if terrain_slope_shading:
-				var steep := clampf((1.0 - nrm.y - 0.22) / 0.5, 0.0, 1.0)
-				col = col.lerp(Color(0.34, 0.31, 0.29), steep * 0.8)
+			if lu[i].a > 0.0:
+				col = col.lerp(Color(lu[i].r, lu[i].g, lu[i].b), 0.55)
+			col.a = carve_cut[i] if carve_cut.size() == gw * gh else 0.0
 			cols[i] = col
 
+	# Punch a hole along the route: skip every cell within apron_reach of the route,
+	# leaving a gap the apron mesh (_build_road_apron) fills so terrain ends at the road
+	# edge instead of leaning over it. Only when the apron is on, else the gap would show.
+	var blocked := _blocked_cells() if (road_apron and not pts.is_empty()) else PackedByteArray()
 	var idx := PackedInt32Array()
 	for r in range(gh - 1):
 		for c in range(gw - 1):
+			if not blocked.is_empty() and blocked[r * gw + c] != 0:
+				continue
 			var a := r * gw + c
 			var b := r * gw + c + 1
 			var d := (r + 1) * gw + c
@@ -486,15 +774,121 @@ func _build_terrain() -> void:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 
-	var mat := StandardMaterial3D.new()
-	mat.vertex_color_use_as_albedo = true
-	mat.roughness = 1.0
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED   # East-negation flips winding
-	mesh.surface_set_material(0, mat)
+	mesh.surface_set_material(0, _terrain_material())
 
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	add_child(mi)
+
+
+# Cells whose center lies within apron_reach of the route — the ones the apron replaces.
+# Mirrors the carve's station-stamp loop + coordinate inversion (East negated).
+func _blocked_cells() -> PackedByteArray:
+	var blocked := PackedByteArray(); blocked.resize(gw * gh); blocked.fill(0)
+	var reach := apron_reach_m
+	var rad_c := int(ceil(reach / absf(mpp_x))) + 1
+	var rad_r := int(ceil(reach / absf(mpp_z))) + 1
+	for i in range(pts.size()):
+		var wx := float(pts[i].x)
+		var wz := float(pts[i].z)
+		var cc := int(floor((-wx - x0) / mpp_x))
+		var rc := int(floor((wz - z0) / mpp_z))
+		for r in range(maxi(rc - rad_r, 0), mini(rc + rad_r, gh - 2) + 1):
+			for c in range(maxi(cc - rad_c, 0), mini(cc + rad_c, gw - 2) + 1):
+				var cx := -(x0 + (c + 0.5) * mpp_x)   # cell center
+				var cz := z0 + (r + 0.5) * mpp_z
+				if (cx - wx) * (cx - wx) + (cz - wz) * (cz - wz) <= reach * reach:
+					blocked[r * gw + c] = 1
+	return blocked
+
+
+# Fill the route hole with a graded shoulder: a strip down each road edge whose inner edge
+# is the asphalt edge (road height, a shared seam) and whose outer edge drapes to true
+# terrain past the hole — so terrain triangles terminate at the road edge, no bleed, and
+# the cut bank still follows the real hillside (no over-flattening).
+func _build_road_apron() -> void:
+	var n := pts.size()
+	if n < 2 or road_center_y.size() != n:
+		return
+	var hw := road_width * 0.5
+	var cell_diag := sqrt(mpp_x * mpp_x + mpp_z * mpp_z)
+	var outer := apron_reach_m + cell_diag        # reach past the hole so there's no gap
+	# Per-station miter normal + scale (same math as _add_centered_ribbon).
+	var nrm_at := PackedVector2Array(); nrm_at.resize(n)
+	var scale_at := PackedFloat32Array(); scale_at.resize(n)
+	for i in range(n):
+		var here := Vector2(float(pts[i].x), float(pts[i].z))
+		var din := Vector2.ZERO
+		var dout := Vector2.ZERO
+		if i > 0:
+			din = (here - Vector2(float(pts[i - 1].x), float(pts[i - 1].z))).normalized()
+		if i < n - 1:
+			dout = (Vector2(float(pts[i + 1].x), float(pts[i + 1].z)) - here).normalized()
+		var ref := dout if dout != Vector2.ZERO else din
+		var tang := din + dout
+		if tang.length() < 0.00001:
+			tang = ref
+		tang = tang.normalized()
+		var nrm := Vector2(tang.y, -tang.x)
+		var refn := Vector2(ref.y, -ref.x)
+		var dotp := nrm.dot(refn)
+		var s := 1.0
+		if absf(dotp) > 0.25:
+			s = 1.0 / dotp
+		nrm_at[i] = nrm
+		scale_at[i] = clampf(s, -3.0, 3.0)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for side in [1.0, -1.0]:                       # +1 left edge, -1 right edge
+		for i in range(n - 1):
+			_apron_quad(st, i, i + 1, side, hw, outer, nrm_at, scale_at)
+	var mesh := st.commit()
+	var mat := StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo = true
+	mat.roughness = 1.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.surface_set_material(0, mat)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	add_child(mi)
+	print("road apron: %.0fm reach, hole + shoulder along %d stations" % [outer, n])
+
+
+func _apron_quad(st: SurfaceTool, i: int, j: int, side: float, hw: float, outer: float,
+		nrm_at: PackedVector2Array, scale_at: PackedFloat32Array) -> void:
+	var ci := Vector2(float(pts[i].x), float(pts[i].z))
+	var cj := Vector2(float(pts[j].x), float(pts[j].z))
+	# Inner edge keeps the asphalt's miter (so it stays glued to the road edge); the OUTER
+	# edge uses a plain bisector offset (NO 1/dotp magnification) — magnifying a ~20 m offset
+	# at a bend flings vertices tens of metres out and tears the mesh into non-manifold spikes.
+	var inn_i := ci + nrm_at[i] * (side * hw * scale_at[i])
+	var inn_j := cj + nrm_at[j] * (side * hw * scale_at[j])
+	var out_i := ci + nrm_at[i] * (side * outer)
+	var out_j := cj + nrm_at[j] * (side * outer)
+	# inner edge at road height (coincident with the asphalt edge); outer drapes to terrain,
+	# nudged just under it so the surviving grid wins any overlap fringe (no z-fight).
+	var I0 := Vector3(inn_i.x, road_center_y[i] + road_lift, inn_i.y)
+	var I1 := Vector3(inn_j.x, road_center_y[j] + road_lift, inn_j.y)
+	var O0 := Vector3(out_i.x, _terrain_y(out_i.x, out_i.y) - 0.05, out_i.y)
+	var O1 := Vector3(out_j.x, _terrain_y(out_j.x, out_j.y) - 0.05, out_j.y)
+	_apron_tri(st, I0, O0, I1)
+	_apron_tri(st, I1, O0, O1)
+
+
+func _apron_tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var nrm := (b - a).cross(c - a).normalized()
+	if nrm.y < 0.0:
+		nrm = -nrm
+	# Color exactly like _build_terrain: elevation ramp + slope shading, so a steep apron
+	# face greys to rock like the cut bank it is and blends with the surrounding terrain.
+	for v in [a, b, c]:
+		var col := _elev_color(v.y)
+		if terrain_slope_shading:
+			var steep := clampf((1.0 - nrm.y - 0.22) / 0.5, 0.0, 1.0)
+			col = col.lerp(Color(0.34, 0.31, 0.29), steep * 0.8)
+		st.set_color(col)
+		st.set_normal(nrm)
+		st.add_vertex(v)
 
 
 func _build_road() -> void:
@@ -507,8 +901,10 @@ func _build_road() -> void:
 	var line := PackedVector2Array()
 	for p in pts:
 		line.append(Vector2(float(p.x), float(p.z)))
-	_road_surface(line, road_width * 0.5, road_lift, Color(0.30, 0.30, 0.33), 0.9)
+	_road_surface(line, road_width * 0.5, road_lift, Color(0.30, 0.30, 0.33), 0.9, _tarmac_material())
 	_road_surface(line, 0.30, road_lift + 0.12, Color(0.95, 0.82, 0.15), 0.6)
+	if road_apron:
+		_build_road_apron()
 
 
 # Precompute per-route-point heading + a coarse spatial grid, so the OSM cull can
@@ -596,16 +992,19 @@ func _compute_road_center_y() -> void:
 # Flat-across mitered ribbon along the route, every station pinned to its
 # precomputed center height + lift. One mesh, one material.
 func _road_surface(line: PackedVector2Array, hw: float, lift: float,
-		col: Color, rough: float) -> void:
+		col: Color, rough: float, mat_override: Material = null) -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	if not _add_centered_ribbon(st, line, hw, lift):
 		return
 	var mesh := st.commit()
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = col
-	mat.roughness = rough
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mat: Material = mat_override
+	if mat == null:
+		var sm := StandardMaterial3D.new()
+		sm.albedo_color = col
+		sm.roughness = rough
+		sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat = sm
 	mesh.surface_set_material(0, mat)
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
@@ -760,14 +1159,10 @@ func _add_ribbon(st: SurfaceTool, line: PackedVector2Array, hw: float, lift: flo
 # --- OSM feature layers (roads, water, landuse) -----------------------------
 
 func _build_features() -> void:
-	if not FileAccess.file_exists(_dpath("features.json")):
+	var data := _load_features()
+	if data.is_empty():
 		print("no features.json — skipping OSM layers (run tools/osm_to_features.py)")
 		return
-	var parsed = JSON.parse_string(FileAccess.get_file_as_string(_dpath("features.json")))
-	if typeof(parsed) != TYPE_DICTIONARY:
-		push_warning("features.json did not parse")
-		return
-	var data: Dictionary = parsed
 
 	if show_roads:
 		var route_to_bucket := {
@@ -813,17 +1208,13 @@ func _build_features() -> void:
 		if not wpolys.is_empty():
 			_drape_polygons(wpolys, Color(0.18, 0.38, 0.55), feature_lift * 0.3, 0.85)
 
-	if show_landuse:
-		var by_class := {}
-		for lu in data.get("landuse", []):
-			var c = lu["class"]
-			if not by_class.has(c):
-				by_class[c] = []
-			by_class[c].append(_flipx(lu["pts"]))
-		for c in by_class:
-			_drape_polygons(by_class[c], _landuse_color(c), 0.05, 0.45)
+	# Landuse landcover is baked into the terrain vertex colors (conformed, opaque) in
+	# _landuse_grid()/_build_terrain — no floating translucent overlay / green stripe.
 
 	_build_buildings(data)
+	_build_barriers()
+	_build_power()
+	_build_bridges()
 
 
 # Extrude OSM building footprints: walls + flat roof, base sunk to the lowest
@@ -837,6 +1228,11 @@ func _build_buildings(data: Dictionary) -> void:
 		return
 	var walls := SurfaceTool.new(); walls.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var roofs := SurfaceTool.new(); roofs.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# small palettes so the block of buildings isn't one flat grey — varied per building
+	var wall_pal := [Color(0.74, 0.70, 0.62), Color(0.66, 0.62, 0.58), Color(0.80, 0.76, 0.68),
+		Color(0.60, 0.56, 0.52), Color(0.72, 0.66, 0.60), Color(0.68, 0.64, 0.66)]
+	var roof_pal := [Color(0.44, 0.27, 0.20), Color(0.34, 0.33, 0.35), Color(0.30, 0.27, 0.25),
+		Color(0.50, 0.31, 0.22), Color(0.26, 0.30, 0.31), Color(0.38, 0.20, 0.17)]
 	var any := false
 	for b in blds:
 		var ring := PackedVector2Array()
@@ -854,6 +1250,9 @@ func _build_buildings(data: Dictionary) -> void:
 			cx += v.x; cz += v.y
 		cx /= ring.size(); cz /= ring.size()
 		var roof_y := base_y + h
+		var key := int(absf(cx) * 0.7 + absf(cz) * 1.3)   # deterministic per-building tint
+		var wcol: Color = wall_pal[key % wall_pal.size()]
+		var rcol: Color = roof_pal[(key / 2) % roof_pal.size()]
 		var n := ring.size()
 		for i in range(n):
 			var a := ring[i]
@@ -871,17 +1270,25 @@ func _build_buildings(data: Dictionary) -> void:
 			var vc := Vector3(a.x, roof_y, a.y)
 			var vd := Vector3(c.x, roof_y, c.y)
 			for v in [va, vc, vb, vb, vc, vd]:
-				walls.set_normal(nrm); walls.add_vertex(v)
-		var tris := Geometry2D.triangulate_polygon(ring)
-		for ti in tris:
-			var v := ring[ti]
-			roofs.set_normal(Vector3.UP)
-			roofs.add_vertex(Vector3(v.x, roof_y, v.y))
+				walls.set_color(wcol); walls.set_normal(nrm); walls.add_vertex(v)
+		# pitched hip roof: each footprint edge → a triangle up to a central apex
+		var roof_h := clampf(h * 0.28, 1.5, 4.5)
+		var apex := Vector3(cx, roof_y + roof_h, cz)
+		for j in range(n):
+			var ea := ring[j]
+			var ec := ring[(j + 1) % n]
+			var ra := Vector3(ea.x, roof_y, ea.y)
+			var rb := Vector3(ec.x, roof_y, ec.y)
+			var rn := (rb - ra).cross(apex - ra).normalized()
+			if rn.y < 0.0:
+				rn = -rn
+			for v in [ra, rb, apex]:
+				roofs.set_color(rcol); roofs.set_normal(rn); roofs.add_vertex(v)
 		any = true
 	if not any:
 		return
-	_commit_surface(walls, Color(0.62, 0.60, 0.57), 0.9)
-	_commit_surface(roofs, Color(0.40, 0.39, 0.41), 0.85)
+	_commit_vcol(walls, 0.9)
+	_commit_vcol(roofs, 0.85)
 
 
 func _commit_surface(st: SurfaceTool, col: Color, rough: float) -> void:
@@ -896,6 +1303,187 @@ func _commit_surface(st: SurfaceTool, col: Color, rough: float) -> void:
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	add_child(mi)
+
+
+# Commit a SurfaceTool that already carries per-vertex colors (vertex_color_use_as_albedo).
+func _commit_vcol(st: SurfaceTool, rough: float) -> void:
+	var mesh := st.commit()
+	if mesh == null:
+		return
+	var mat := StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo = true
+	mat.roughness = rough
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.surface_set_material(0, mat)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	add_child(mi)
+
+
+# A vertical wall strip along a draped polyline (fences, hedges, walls, railings):
+# each segment is a quad from terrain (+base_lift) up to +height, per-vertex colored.
+func _add_vertical_ribbon(st: SurfaceTool, line: PackedVector2Array, height: float,
+		base_lift: float, col: Color) -> void:
+	for i in range(line.size() - 1):
+		var a := line[i]; var b := line[i + 1]
+		var ya := _terrain_y(a.x, a.y) + base_lift
+		var yb := _terrain_y(b.x, b.y) + base_lift
+		var dx := b.x - a.x; var dz := b.y - a.y
+		var dl := sqrt(dx * dx + dz * dz)
+		if dl < 0.001:
+			continue
+		var nrm := Vector3(dz / dl, 0.0, -dx / dl)
+		var A0 := Vector3(a.x, ya, a.y)
+		var B0 := Vector3(b.x, yb, b.y)
+		var A1 := Vector3(a.x, ya + height, a.y)
+		var B1 := Vector3(b.x, yb + height, b.y)
+		for v in [A0, A1, B0, B0, A1, B1]:
+			st.set_color(col); st.set_normal(nrm); st.add_vertex(v)
+
+
+# A thin square post from y=0 to y=h (power poles), one mesh for MultiMesh instancing.
+func _make_post_mesh(h: float, w: float, col: Color) -> ArrayMesh:
+	var st := SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var corners := [Vector2(-w, -w), Vector2(w, -w), Vector2(w, w), Vector2(-w, w)]
+	for i in range(4):
+		var a2: Vector2 = corners[i]
+		var b2: Vector2 = corners[(i + 1) % 4]
+		var a0 := Vector3(a2.x, 0.0, a2.y); var b0 := Vector3(b2.x, 0.0, b2.y)
+		var a1 := Vector3(a2.x, h, a2.y); var b1 := Vector3(b2.x, h, b2.y)
+		for v in [a0, a1, b0, b0, a1, b1]:
+			st.set_color(col); st.add_vertex(v)
+	st.generate_normals()
+	var mesh := ArrayMesh.new(); st.commit(mesh)
+	var mat := StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo = true; mat.roughness = 1.0
+	mesh.surface_set_material(0, mat)
+	return mesh
+
+
+# OSM barriers: fences / hedges / walls as draped vertical strips, colored by type.
+func _build_barriers() -> void:
+	if not show_barriers:
+		return
+	var bars: Array = _load_features().get("barriers", [])
+	if bars.is_empty():
+		return
+	var st := SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var any := false
+	for bar in bars:
+		var line := PackedVector2Array()
+		for p in _flipx(bar["pts"]):
+			line.append(Vector2(float(p[0]), float(p[1])))
+		if line.size() < 2:
+			continue
+		var cls = bar.get("class", "fence")
+		var h := 1.1
+		var col := Color(0.46, 0.41, 0.34)              # fence: weathered wood/wire
+		if cls == "hedge":
+			h = 1.6; col = Color(0.21, 0.33, 0.17)      # hedge: green
+		elif cls == "wall" or cls == "dry_stone_wall" or cls == "retaining_wall":
+			h = 1.2; col = Color(0.50, 0.49, 0.47)      # wall: grey stone
+		_add_vertical_ribbon(st, line, h, 0.0, col)
+		any = true
+	if any:
+		_commit_vcol(st, 1.0)
+		print("barriers: %d" % bars.size())
+
+
+# OSM power: wires as thin dark ribbons elevated on poles + posts at each tower/pole.
+func _build_power() -> void:
+	if not show_power:
+		return
+	var data := _load_features()
+	var plines := []
+	for pl in data.get("powerlines", []):
+		plines.append(_flipx(pl["pts"]))
+	if not plines.is_empty():
+		_drape_lines(plines, 0.12, Color(0.05, 0.05, 0.06), power_height, 0.4)
+	var poles: Array = data.get("power_poles", [])
+	if poles.is_empty():
+		return
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _make_post_mesh(power_height, 0.16, Color(0.27, 0.21, 0.15))
+	mm.instance_count = poles.size()
+	for i in range(poles.size()):
+		var x := -float(poles[i][0]); var z := float(poles[i][1])
+		mm.set_instance_transform(i, Transform3D(Basis(), Vector3(x, _terrain_y(x, z), z)))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	add_child(mmi)
+	print("power: %d lines, %d poles" % [plines.size(), poles.size()])
+
+
+# Bridge spans (road bridge=yes): a level-ish deck (lerp between approach heights so it
+# clears the dip) + side railings, so water crossings read as bridges not sunken roads.
+func _build_bridges() -> void:
+	if not show_bridges:
+		return
+	var st := SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var rail := SurfaceTool.new(); rail.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var hw := 2.4
+	var deck_col := Color(0.32, 0.32, 0.34)
+	var rail_col := Color(0.52, 0.50, 0.47)
+	var any := false
+	for r in _load_features().get("roads", []):
+		if not r.get("bridge", false):
+			continue
+		var line := PackedVector2Array()
+		for p in _flipx(r["pts"]):
+			line.append(Vector2(float(p[0]), float(p[1])))
+		var n := line.size()
+		if n < 2:
+			continue
+		var y0 := _terrain_y(line[0].x, line[0].y)
+		var y1 := _terrain_y(line[n - 1].x, line[n - 1].y)
+		var left := PackedVector2Array(); var right := PackedVector2Array()
+		var deck_y := PackedFloat32Array(); deck_y.resize(n)
+		for i in range(n):
+			var t := float(i) / float(n - 1)
+			# level deck across the span, but never below the local ground
+			deck_y[i] = maxf(lerpf(y0, y1, t), _terrain_y(line[i].x, line[i].y)) + feature_lift + 0.4
+			var din := Vector2.ZERO; var dout := Vector2.ZERO
+			if i > 0:
+				din = (line[i] - line[i - 1]).normalized()
+			if i < n - 1:
+				dout = (line[i + 1] - line[i]).normalized()
+			var tang := din + dout
+			if tang.length() < 0.0001:
+				tang = dout if dout != Vector2.ZERO else din
+			tang = tang.normalized()
+			var nrm := Vector2(tang.y, -tang.x)
+			left.append(line[i] + nrm * hw)
+			right.append(line[i] - nrm * hw)
+		for i in range(n - 1):
+			var L0 := Vector3(left[i].x, deck_y[i], left[i].y)
+			var R0 := Vector3(right[i].x, deck_y[i], right[i].y)
+			var L1 := Vector3(left[i + 1].x, deck_y[i + 1], left[i + 1].y)
+			var R1 := Vector3(right[i + 1].x, deck_y[i + 1], right[i + 1].y)
+			for v in [L0, L1, R0, R0, L1, R1]:
+				st.set_color(deck_col); st.set_normal(Vector3.UP); st.add_vertex(v)
+		_add_rail_at(rail, left, deck_y, 0.9, rail_col)
+		_add_rail_at(rail, right, deck_y, 0.9, rail_col)
+		any = true
+	if any:
+		_commit_vcol(st, 0.9)
+		_commit_vcol(rail, 0.9)
+
+
+# Railing strip along an edge at explicit per-vertex heights (bridge decks).
+func _add_rail_at(st: SurfaceTool, edge: PackedVector2Array, ybase: PackedFloat32Array,
+		height: float, col: Color) -> void:
+	for i in range(edge.size() - 1):
+		var a := edge[i]; var b := edge[i + 1]
+		var dx := b.x - a.x; var dz := b.y - a.y
+		var dl := sqrt(dx * dx + dz * dz)
+		var nrm := Vector3(dz, 0.0, -dx) / (dl if dl > 0.001 else 1.0)
+		var A0 := Vector3(a.x, ybase[i], a.y)
+		var B0 := Vector3(b.x, ybase[i + 1], b.y)
+		var A1 := Vector3(a.x, ybase[i] + height, a.y)
+		var B1 := Vector3(b.x, ybase[i + 1] + height, b.y)
+		for v in [A0, A1, B0, B0, A1, B1]:
+			st.set_color(col); st.set_normal(nrm); st.add_vertex(v)
 
 
 # Negate East on a list of [x,z] points (OSM is an independent data source; see
@@ -987,6 +1575,8 @@ func _build_camera_and_sky() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-45, 130, 0)
 	sun.shadow_enabled = true
+	sun.light_energy = 1.25                       # brighter so terrain color/grain reads
+	sun.light_color = Color(1.0, 0.97, 0.90)      # slightly warm daylight
 	add_child(sun)
 
 	var env := Environment.new()
@@ -996,7 +1586,7 @@ func _build_camera_and_sky() -> void:
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.fog_enabled = true
-	env.fog_density = 0.0008
+	env.fog_density = 0.00025            # lighter aerial haze (was 0.0008 = heavy wash-out)
 	env.glow_enabled = true              # bloom for the emissive avatar (Tron look)
 	var we := WorldEnvironment.new()
 	we.environment = env
