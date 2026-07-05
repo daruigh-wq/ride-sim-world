@@ -31,3 +31,21 @@ godot/.import/
 # exported binaries (regenerable; large)
 build/
 # export_presets.cfg IS tracked — the P6 macOS export config (no signing secrets)
+
+# Avatar 3D models are NEVER committed/shipped — drop-in only, kept local.
+# The loader (Main.gd _spawn_avatar) falls back to the procedural Tron rider when
+# absent, so a release built without a model is safe by default. Only ship a model
+# you have the rights to distribute. README.md in assets/ IS tracked (the contract).
+godot/assets/*.glb
+godot/assets/*.gltf
+godot/assets/*.import
+# Blender working files repo-wide (often hold not-for-distribution source meshes)
+*.blend
+*.blend1
+# Textures extracted from the (never-shipped) avatar models travel with them
+godot/assets/*.jpg
+godot/assets/*.jpeg
+godot/assets/*.png
+# Harness screenshot output (root-level test renders) + personal ride recordings
+/*.png
+/*.tcx

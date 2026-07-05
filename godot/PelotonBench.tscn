@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cpelobench1harn"]
+
+[ext_resource type="Script" path="res://PelotonBench.gd" id="1"]
+
+[node name="PelotonBench" type="Node3D"]
+script = ExtResource("1")

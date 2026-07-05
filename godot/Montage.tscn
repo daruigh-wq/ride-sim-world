@@ -1,0 +1,4 @@
+[gd_scene load_steps=2 format=3 uid="uid://b1montage001"]
+[ext_resource type="Script" path="res://Montage.gd" id="1"]
+[node name="Montage" type="Node"]
+script = ExtResource("1")

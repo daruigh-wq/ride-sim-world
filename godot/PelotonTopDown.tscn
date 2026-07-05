@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cptopdn0harness1"]
+
+[ext_resource type="Script" path="res://PelotonTopDown.gd" id="1"]
+
+[node name="PelotonTopDown" type="Node3D"]
+script = ExtResource("1")

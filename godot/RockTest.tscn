@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://crocktest1harn"]
+
+[ext_resource type="Script" path="res://RockTest.gd" id="1"]
+
+[node name="RockTest" type="Node3D"]
+script = ExtResource("1")

@@ -4,7 +4,7 @@
 
 [node name="Main" type="Node3D" unique_id=1301346264]
 script = ExtResource("1")
-demo_speed = 30.0
+demo_speed = 6.0
 cam_back_m = 4.0
 cam_height = 4.0
 minimap_size = 600
