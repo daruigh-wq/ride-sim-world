@@ -148,6 +148,24 @@ def main():
             gx.append("--reverse")
         run_step(4, total, "ride_sim TCX (matching route + grade)", gx)
 
+    # Provenance: stamp the source route + its footprint into world.json so
+    # ride_sim can pair this world with its ride file exactly (not by geography).
+    try:
+        wj_path = out / "world.json"
+        wj = json.loads(wj_path.read_text())
+        rj = json.loads(route_json.read_text())
+        wj["source_route"] = route.name
+        wj["route_bbox"] = {k: round(float(v), 6)
+                            for k, v in rj.get("bbox", {}).items()}
+        wj["length_m"] = round(float(rj.get("length_m", 0.0)), 1)
+        ride = tcx_path.name if tcx_path is not None else (
+            route.name if ext == ".tcx" else None)
+        if ride:
+            wj["ride_tcx"] = ride
+        wj_path.write_text(json.dumps(wj, indent=2))
+    except Exception as e:
+        print(f"    (couldn't stamp provenance into world.json: {e})")
+
     active = out.resolve() == DEFAULT_DATA.resolve()
     print(f"\n✓ world baked in {time.time() - t_all:.0f}s  →  {out}")
     if active:
