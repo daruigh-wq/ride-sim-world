@@ -219,22 +219,22 @@ extends Node3D
 @export var peloton_station_gap_m: float = 11.0  # along-route spacing between same-lane riders (m)
 @export var peloton_bike_len_m: float = 2.0      # min centre-to-centre same-lane gap kept above this
 @export var peloton_bubble_m: float = 3.0        # MAKE-ROOM max shift (m): reserved out of the
-                                                 # drift budget → AI–AI no-convergence holds.
-                                                 # = hold_m + the Schmitt flip threshold.
+												 # drift budget → AI–AI no-convergence holds.
+												 # = hold_m + the Schmitt flip threshold.
 @export var peloton_bubble_hold_m: float = 2.0   # rendered clearance the hold maintains (m):
-                                                 # a latched rider is kept ≥ this away — one
-                                                 # bike length, so wheels never overlap.
+												 # a latched rider is kept ≥ this away — one
+												 # bike length, so wheels never overlap.
 @export var peloton_bubble_zone_m: float = 8.0   # along-route half-zone the yield engages over
 @export var peloton_bubble_rate_mps: float = 3.0 # max speed a yield adds/removes (keeps it calm)
 @export var peloton_drift_wl_m: float = 280.0    # SLOW surge wavelength (m): the visible ebb,
-                                                 # ~tens of seconds per cycle at cruise
+												 # ~tens of seconds per cycle at cruise
 @export var peloton_drift_tex_wl_m: float = 45.0 # FAST texture wavelength (m): small pace jitter
 @export var peloton_drift_wl_spread: float = 0.40  # per-rider surge-wavelength spread (fraction)
 @export var peloton_drift_speed_frac: float = 0.20  # max fore/aft surge as a fraction of pack pace
-                                                    # (0.20 → riders ride 0.8–1.2× the pack)
+													# (0.20 → riders ride 0.8–1.2× the pack)
 @export var peloton_drift_row_phase: float = 0.6 # slow-wave phase step per station row (rad):
-                                                 # surges PROPAGATE through the pack like a real
-                                                 # accordion wave; 0 = every rider ebbs alone
+												 # surges PROPAGATE through the pack like a real
+												 # accordion wave; 0 = every rider ebbs alone
 											   # (caps the surge VELOCITY so a rider never stalls/reverses
 											   # — amp is auto-shrunk from drift_cap to honour this)
 @export var peloton_pack_follow_tau: float = 4.0 # how slowly the pack re-centres on you (s): bigger =
@@ -449,6 +449,7 @@ var _ui_trees: CheckBox
 var _ui_centerline: CheckBox
 var _ui_perf: CheckBox
 var _ui_cam: CheckBox
+var _ui_fullscreen: CheckBox        # windowed/fullscreen toggle (also F11 / Shift+Enter)
 var centerline_mi: MeshInstance3D   # the yellow route stripe, kept for runtime toggle
 var _ui_glow: CheckBox
 var _syncing := false              # guard: preset sync sets widgets without re-firing
@@ -2117,6 +2118,7 @@ func _build_detail_panel() -> void:
 	_ui_centerline = _add_check(vb, "Centerline stripe", show_centerline, "centerline")
 	_ui_perf = _add_check(vb, "FPS / perf readout", show_perf, "perf")
 	_ui_cam = _add_check(vb, "View controls", show_cam, "cam")
+	_ui_fullscreen = _add_check(vb, "Fullscreen", _is_fullscreen(), "fullscreen")
 
 	# --- Peloton pacing: a CONTINUOUS ability dial (the category presets from ride_sim
 	# are just detents on it) + companion mode. Live — no respawn needed, the capability
@@ -2216,6 +2218,9 @@ func _on_toggle(on: bool, which: String) -> void:
 			show_cam = on
 			if on:
 				_ride_t = 0.0   # re-show the controls for another fade interval
+			return
+		"fullscreen":
+			_set_fullscreen(on)
 			return
 	_apply_quality()
 	_update_quality_label()
@@ -3725,6 +3730,23 @@ func _managed_by_ridesim() -> bool:
 		or OS.get_environment("RIDESIM_WORLD_SCREEN_POS") != ""
 
 
+func _is_fullscreen() -> bool:
+	var m := DisplayServer.window_get_mode()
+	return m == DisplayServer.WINDOW_MODE_FULLSCREEN \
+		or m == DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN
+
+
+func _set_fullscreen(on: bool) -> void:
+	DisplayServer.window_set_mode(
+		DisplayServer.WINDOW_MODE_FULLSCREEN if on else DisplayServer.WINDOW_MODE_WINDOWED)
+	if _ui_fullscreen != null:
+		_ui_fullscreen.set_pressed_no_signal(on)   # keep the Detail-panel box in sync
+
+
+func _toggle_fullscreen() -> void:
+	_set_fullscreen(not _is_fullscreen())
+
+
 func _unhandled_input(e: InputEvent) -> void:
 	# Mouse: wheel zooms, right-drag orbits (DRONE/FREE).
 	if e is InputEventMouseButton:
@@ -3763,12 +3785,17 @@ func _unhandled_input(e: InputEvent) -> void:
 				if seek_input.visible:
 					seek_input.text = ""
 					seek_input.grab_focus()
+		KEY_F11:
+			_toggle_fullscreen()
+		KEY_ENTER, KEY_KP_ENTER:
+			if k.shift_pressed:
+				_toggle_fullscreen()
 		KEY_ESCAPE:
 			# Escape un-fullscreens first (macOS convention). Only quit when
 			# standalone — in a ride_sim-driven ride, quitting here would strand
 			# the ride_sim dashboard, so let ride_sim own the lifecycle.
-			if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
-				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+			if _is_fullscreen():
+				_set_fullscreen(false)
 			elif not _managed_by_ridesim():
 				get_tree().quit()
 		KEY_SPACE:
