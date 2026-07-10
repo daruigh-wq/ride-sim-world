@@ -3737,10 +3737,22 @@ func _is_fullscreen() -> bool:
 
 
 func _set_fullscreen(on: bool) -> void:
-	DisplayServer.window_set_mode(
-		DisplayServer.WINDOW_MODE_FULLSCREEN if on else DisplayServer.WINDOW_MODE_WINDOWED)
+	if on:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+	else:
+		# The window is BORN fullscreen (project.godot window/size/mode=Fullscreen),
+		# so it has no saved windowed rect. On Windows, WINDOW_MODE_WINDOWED then
+		# gets size 0 / an invalid position and the compositor snaps it straight
+		# back to fullscreen (the "flash once, stays fullscreen" bug). Assign an
+		# explicit centered rect on the current screen so windowed mode sticks.
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		var scr := DisplayServer.window_get_current_screen()
+		var usable := DisplayServer.screen_get_usable_rect(scr)
+		var wsize := Vector2i(int(usable.size.x * 0.85), int(usable.size.y * 0.85))
+		DisplayServer.window_set_size(wsize)
+		DisplayServer.window_set_position(usable.position + (usable.size - wsize) / 2)
 	if _ui_fullscreen != null:
-		_ui_fullscreen.set_pressed_no_signal(on)   # keep the Detail-panel box in sync
+		_ui_fullscreen.set_pressed_no_signal(_is_fullscreen())   # reflect the ACTUAL mode
 
 
 func _toggle_fullscreen() -> void:
