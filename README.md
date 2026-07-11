@@ -2,9 +2,9 @@
 
 A fully **offline**, real-elevation cycling world: public DEM data → low-poly
 shaded terrain with your actual road draped on it, flown on-rails by
-[ride_sim](../ride-sim)'s distance signal. No account, no fantasy scenery, no
-360-camera capture — the lightweight alternative to the
-[splat path](../ride-sim-splat).
+[ride_sim](https://github.com/daruigh-wq/ride-sim)'s distance signal. No account,
+no fantasy scenery, no 360-camera capture — the lightweight alternative to the
+splat path (a photogrammetry-based world, planned/not yet public).
 
 > **Status: working prototype.** The data pipeline (route + DEM → Godot assets)
 > runs end-to-end; a Godot 4 project builds the terrain, road, and on-rails
@@ -90,7 +90,7 @@ exports are git-ignored — regenerate them from your own rides.
 Three repos, one contract:
 - **ride-sim** — the app; emits `distance_along_route` (+ speed/grade/heading).
 - **ride-sim-world** (this) — DEM terrain world, the easy/offline backend.
-- **ride-sim-splat** — photogrammetric splat world, the high-fidelity backend.
+- **ride-sim-splat** — photogrammetric splat world, the high-fidelity backend *(planned; not yet a public repo)*.
 
 Both world repos render the same on-rails camera from the same distance signal
 (`ride-sim/docs/engine_interface.md`). Pick a backend per route by effort vs
